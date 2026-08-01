@@ -4,7 +4,7 @@
 
 Report vulnerabilities privately via GitHub Security Advisories:
 
-**https://github.com/gregtaschuk/cdp-wagmi-rn/security/advisories/new**
+**https://github.com/PyriteShip/cdp-wagmi-rn/security/advisories/new**
 
 Do not open a public issue for security findings. There is no bug bounty program.
 

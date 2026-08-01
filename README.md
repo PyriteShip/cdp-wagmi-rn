@@ -1,7 +1,7 @@
 # cdp-wagmi-rn
 
 [![npm](https://img.shields.io/npm/v/cdp-wagmi-rn)](https://www.npmjs.com/package/cdp-wagmi-rn)
-[![CI](https://github.com/gregtaschuk/cdp-wagmi-rn/actions/workflows/ci.yml/badge.svg)](https://github.com/gregtaschuk/cdp-wagmi-rn/actions/workflows/ci.yml)
+[![CI](https://github.com/PyriteShip/cdp-wagmi-rn/actions/workflows/ci.yml/badge.svg)](https://github.com/PyriteShip/cdp-wagmi-rn/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/cdp-wagmi-rn)](./LICENSE)
 
 A [Coinbase CDP](https://docs.cdp.coinbase.com/) embedded smart-account wallet
