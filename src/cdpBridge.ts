@@ -84,3 +84,27 @@ export function waitForCdpAddress(timeoutMs = 15000): Promise<string> {
     });
   });
 }
+
+/**
+ * Resolve with the bridge state once `<CdpStateBinder>` has hydrated it
+ * (`initialized` true), or with whatever is there when `timeoutMs` elapses.
+ * wagmi's cold-start autoConnect calls `isAuthorized()` before the React tree
+ * has written the first bridge snapshot — answering from the zeroed initial
+ * state there reads as "signed out" and drops a restorable session.
+ */
+export function waitForCdpInitialized(timeoutMs = 2000): Promise<CdpState> {
+  if (state.initialized) return Promise.resolve({ ...state });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      unsub();
+      resolve({ ...state });
+    }, timeoutMs);
+    const unsub = subscribeCdpState((s) => {
+      if (s.initialized) {
+        clearTimeout(timer);
+        unsub();
+        resolve(s);
+      }
+    });
+  });
+}

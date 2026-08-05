@@ -18,14 +18,19 @@ jest.mock('@wagmi/core', () => ({ createConnector: (fn: unknown) => fn }));
 
 // cdpWagmiConnector → cdpEip1193 → cdpAccount → @coinbase/cdp-core. Mock the
 // core so the connector loads without the native/browser CDP runtime.
-jest.mock('@coinbase/cdp-core', () => ({ signOut: jest.fn(async () => {}) }));
+jest.mock('@coinbase/cdp-core', () => ({
+  signOut: jest.fn(async () => {}),
+  // Default: no refresh token — silent revival fails, legacy OTP behavior.
+  getAccessToken: jest.fn(async () => null),
+  getCurrentUser: jest.fn(async () => null),
+}));
 
-import { cdpWagmiConnector, registerCdpAuthRequester } from './cdpWagmiConnector';
+import { cdpWagmiConnector, registerCdpAuthRequester, _resetDropReviveCooldown } from './cdpWagmiConnector';
 import { setCdpState } from './cdpBridge';
 import * as core from '@coinbase/cdp-core';
 import type { CdpWalletConfig } from './cdpConfig';
 
-const cfg: CdpWalletConfig = { chainId: 84532, rpcUrl: 'http://localhost:8545', cdpNetwork: 'base-sepolia' };
+const cfg: CdpWalletConfig = { chainId: 84532, rpcUrl: 'http://localhost:8545', cdpNetwork: 'base-sepolia', hydrationTimeoutMs: 25 };
 
 // createConnector() just returns the factory fn; call it with a minimal config
 // (only emitter is touched, and only by event paths these tests don't exercise).
@@ -36,6 +41,7 @@ function makeConnector(): any {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetDropReviveCooldown();
   registerCdpAuthRequester(null);
   setCdpState({ evmAddress: null, evmEoaAddress: null, initialized: false, signedIn: false });
 });
@@ -98,6 +104,130 @@ describe('connect', () => {
 
     expect(auth).not.toHaveBeenCalled();
     expect(res).toEqual({ accounts: ['0xadopted'], chainId: cfg.chainId });
+  });
+});
+
+describe('connect — silent session revival', () => {
+  test('a lapsed session revives from the refresh token without the OTP modal', async () => {
+    // Regression pin: signing 25 min after OTP sign-in previously re-ran the
+    // FULL ceremony because a lapsed access token read as signed-out.
+    (core.getAccessToken as jest.Mock).mockResolvedValueOnce('fresh-token');
+    (core.getCurrentUser as jest.Mock).mockResolvedValueOnce({
+      userId: 'u1',
+      evmAccounts: ['0xeoa'],
+      evmSmartAccounts: ['0xsmart'],
+    });
+    const auth = jest.fn(async () => {});
+    registerCdpAuthRequester(auth);
+
+    const c = makeConnector();
+    const res = await c.connect();
+
+    expect(auth).not.toHaveBeenCalled();
+    expect(res).toEqual({ accounts: ['0xsmart'], chainId: cfg.chainId });
+    const { getCdpState } = require('./cdpBridge');
+    expect(getCdpState().evmEoaAddress).toBe('0xeoa');
+    expect(getCdpState().signedIn).toBe(true);
+  });
+
+  test('revival failure falls back to the OTP modal', async () => {
+    (core.getAccessToken as jest.Mock).mockResolvedValueOnce(null);
+    const auth = jest.fn(async () => {
+      setCdpState({ signedIn: true, evmAddress: '0xfresh' });
+    });
+    registerCdpAuthRequester(auth);
+
+    const c = makeConnector();
+    const res = await c.connect();
+
+    expect(auth).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ accounts: ['0xfresh'], chainId: cfg.chainId });
+  });
+
+  test('a thrown refresh (network down) falls back to the OTP modal', async () => {
+    (core.getAccessToken as jest.Mock).mockRejectedValueOnce(new Error('offline'));
+    const auth = jest.fn(async () => {
+      setCdpState({ signedIn: true, evmAddress: '0xfresh2' });
+    });
+    registerCdpAuthRequester(auth);
+
+    const c = makeConnector();
+    const res = await c.connect();
+
+    expect(auth).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ accounts: ['0xfresh2'], chainId: cfg.chainId });
+  });
+});
+
+describe('isAuthorized — hydration wait', () => {
+  test('waits for the bridge to hydrate instead of answering from zeroed state', async () => {
+    const c = makeConnector();
+    const pending = c.isAuthorized();
+    // Hydration lands after the call, within the timeout window.
+    setCdpState({ initialized: true, signedIn: true, evmAddress: '0xhydrated' });
+    expect(await pending).toBe(true);
+  });
+
+  test('answers false when hydration never arrives within the timeout', async () => {
+    const c = makeConnector();
+    expect(await c.isAuthorized()).toBe(false);
+  });
+});
+
+describe('setup — address-drop revival', () => {
+  test('a transient address drop with a live refresh token does not emit disconnect', async () => {
+    (core.getAccessToken as jest.Mock).mockResolvedValueOnce('still-valid');
+    (core.getCurrentUser as jest.Mock).mockResolvedValueOnce({
+      userId: 'u1',
+      evmAccounts: ['0xeoa'],
+      evmSmartAccounts: ['0xback'],
+    });
+    const emit = jest.fn();
+    const fn = cdpWagmiConnector(cfg) as any;
+    const c = fn({ emitter: { emit } });
+    setCdpState({ initialized: true, signedIn: true, evmAddress: '0xlive' });
+    await c.setup();
+
+    setCdpState({ signedIn: false, evmAddress: null, evmEoaAddress: null });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(emit).not.toHaveBeenCalledWith('disconnect');
+    // Revival wrote the address back; the subscriber emitted the change event.
+    expect(emit).toHaveBeenCalledWith('change', { accounts: ['0xback'] });
+  });
+
+  test('a second drop inside the cooldown disconnects without another refresh call', async () => {
+    (core.getAccessToken as jest.Mock).mockResolvedValue(null);
+    const emit = jest.fn();
+    const fn = cdpWagmiConnector(cfg) as any;
+    const c = fn({ emitter: { emit } });
+    setCdpState({ initialized: true, signedIn: true, evmAddress: '0xa' });
+    await c.setup();
+
+    setCdpState({ signedIn: false, evmAddress: null });
+    await new Promise((r) => setTimeout(r, 10));
+    const callsAfterFirst = (core.getAccessToken as jest.Mock).mock.calls.length;
+
+    setCdpState({ signedIn: true, evmAddress: '0xa' });
+    setCdpState({ signedIn: false, evmAddress: null });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect((core.getAccessToken as jest.Mock).mock.calls.length).toBe(callsAfterFirst);
+    expect(emit).toHaveBeenCalledWith('disconnect');
+  });
+
+  test('a real sign-out (no refresh token) still propagates disconnect', async () => {
+    (core.getAccessToken as jest.Mock).mockResolvedValue(null);
+    const emit = jest.fn();
+    const fn = cdpWagmiConnector(cfg) as any;
+    const c = fn({ emitter: { emit } });
+    setCdpState({ initialized: true, signedIn: true, evmAddress: '0xlive2' });
+    await c.setup();
+
+    setCdpState({ signedIn: false, evmAddress: null, evmEoaAddress: null });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(emit).toHaveBeenCalledWith('disconnect');
   });
 });
 
