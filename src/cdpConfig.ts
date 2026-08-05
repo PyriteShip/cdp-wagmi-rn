@@ -18,6 +18,13 @@ export interface CdpWalletConfig {
    * `cdpCswWrap.ts`. Load-bearing — only set if Coinbase rotates the factory.
    */
   smartAccountFactory?: string;
+  /**
+   * How long `isAuthorized()` waits for the CDP bridge to hydrate before
+   * answering (ms, default 2000). wagmi's cold-start autoConnect runs before
+   * the React tree writes the first bridge snapshot; without the wait a
+   * restorable session reads as signed-out. Tests pass a small value.
+   */
+  hydrationTimeoutMs?: number;
 }
 
 /**
