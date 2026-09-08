@@ -4,6 +4,17 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # The `release` environment is the anti-accident gate: pushing a tag parks
+    # this run pending a reviewer's approval rather than publishing outright.
+    #
+    # Auth is npm trusted publishing over OIDC: the registered publisher on
+    # npmjs.com names this repo, this workflow filename and this environment,
+    # and the id-token below is what proves all three. There is no NPM_TOKEN —
+    # nothing to leak, rotate, or expire.
+    #
+    # All three names are load-bearing. Renaming this file, changing the
+    # `environment:` value, or moving the repo breaks the publish until the
+    # registration on npm is updated to match.
     environment: release
     permissions:
       contents: read
@@ -14,4 +25,4 @@ jobs:
         with: { node-version: 22, cache: npm, registry-url: 'https://registry.npmjs.org' }
       - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
       - run: npm ci
-      - run: npm publish --provenance    # auth via OIDC; no NPM_TOKEN needed
+      - run: npm publish --provenance
