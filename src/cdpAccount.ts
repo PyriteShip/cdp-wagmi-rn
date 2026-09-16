@@ -198,6 +198,30 @@ export async function cdpSendCalls(
   return waitForUserOpTransactionHash(op.userOperationHash, smartAccount, opts);
 }
 
+/**
+ * A UserOperation that CDP reports as `failed` or `dropped`.
+ *
+ * `failed` means the operation was included but its calls reverted, so
+ * `transactionHash` names the bundle transaction whose receipt records the
+ * revert. `dropped` means it was never included, and `transactionHash` is
+ * unset.
+ */
+export class CdpUserOperationFailedError extends Error {
+  readonly userOperationHash: string;
+  readonly status: 'failed' | 'dropped';
+  readonly transactionHash: string | undefined;
+
+  constructor(userOperationHash: string, status: 'failed' | 'dropped', transactionHash?: string) {
+    super(
+      `CDP UserOp ${userOperationHash} ${status}${transactionHash ? ` (tx ${transactionHash})` : ''}`,
+    );
+    this.name = 'CdpUserOperationFailedError';
+    this.userOperationHash = userOperationHash;
+    this.status = status;
+    this.transactionHash = transactionHash;
+  }
+}
+
 export async function waitForUserOpTransactionHash(
   userOpHash: string,
   smartAccount: string,
@@ -214,8 +238,7 @@ export async function waitForUserOpTransactionHash(
     // transaction mined, but the operation's own calls reverted inside it. The
     // status check comes first so that outcome is never returned as a hash.
     if (state.status === 'failed' || state.status === 'dropped') {
-      const tx = state.transactionHash ? ` (tx ${state.transactionHash})` : '';
-      throw new Error(`CDP UserOp ${userOpHash} ${state.status}${tx}`);
+      throw new CdpUserOperationFailedError(userOpHash, state.status, state.transactionHash || undefined);
     }
     if (state.transactionHash) return state.transactionHash;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));

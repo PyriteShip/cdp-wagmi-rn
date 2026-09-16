@@ -26,7 +26,13 @@ jest.mock('./cdpCswWrap', () => ({
   CDP_SMART_ACCOUNT_FACTORY: '0xFac',
 }));
 
-import { cdpGetAddress, cdpSignMessage, cdpSignTypedData, cdpSendCalls } from './cdpAccount';
+import {
+  cdpGetAddress,
+  cdpSignMessage,
+  cdpSignTypedData,
+  cdpSendCalls,
+  CdpUserOperationFailedError,
+} from './cdpAccount';
 import * as cdpCore from '@coinbase/cdp-core';
 import * as csw from './cdpCswWrap';
 
@@ -54,16 +60,28 @@ test('cdpSendCalls sends a sponsored userOp on the given network and returns the
 
 test('cdpSendCalls throws when the userOp was included but failed', async () => {
   (cdpCore.getUserOperation as jest.Mock).mockResolvedValueOnce({ status: 'failed', transactionHash: '0xTX' });
-  const sent = cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' });
-  await expect(sent).rejects.toThrow(/0xUOP/);
-  await expect(sent).rejects.toThrow(/failed/);
+  const err = await cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' }).catch((e) => e);
+  expect(err).toBeInstanceOf(CdpUserOperationFailedError);
+  expect(err).toMatchObject({ userOperationHash: '0xUOP', status: 'failed', transactionHash: '0xTX' });
+  expect(err.message).toBe('CDP UserOp 0xUOP failed (tx 0xTX)');
 });
+
+test('cdpSendCalls throws a typed error when the userOp is dropped', async () => {
+  (cdpCore.getUserOperation as jest.Mock).mockResolvedValueOnce({ status: 'dropped' });
+  const err = await cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' }).catch((e) => e);
+  expect(err).toBeInstanceOf(CdpUserOperationFailedError);
+  expect(err).toMatchObject({ userOperationHash: '0xUOP', status: 'dropped' });
+  expect(err.transactionHash).toBeUndefined();
+  expect(err.message).toBe('CDP UserOp 0xUOP dropped');
+});
+
 
 test('cdpSendCalls throws on a failed userOp that carries no tx hash', async () => {
   (cdpCore.getUserOperation as jest.Mock).mockResolvedValueOnce({ status: 'failed' });
-  await expect(
-    cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' }),
-  ).rejects.toThrow('CDP UserOp 0xUOP failed');
+  const err = await cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' }).catch((e) => e);
+  expect(err).toBeInstanceOf(CdpUserOperationFailedError);
+  expect(err.transactionHash).toBeUndefined();
+  expect(err.message).toBe('CDP UserOp 0xUOP failed');
 });
 
 test('cdpSignTypedData wraps via CSW (using opts.chainId) and signs with the owner EOA', async () => {
