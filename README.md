@@ -165,6 +165,7 @@ from a binder component that reads the CDP hooks.
 | `setCdpState(patch)` | Patch the bridged state; notifies subscribers on change. |
 | `subscribeCdpState(cb)` | Observe state changes; returns an unsubscribe function. |
 | `waitForCdpAddress(timeoutMs?)` | Resolves once `evmAddress` is non-null (the post-sign-in handoff); 15 s default timeout. |
+| `waitForCdpSignedOut(timeoutMs?)` | The mirror: resolve once the bridge reports signed out, or on timeout — it never rejects. Re-authenticating means signing out and straight back in, and the connector adopts whatever session the bridge reports, so reconnecting before the sign-out has propagated re-adopts the session being torn down and the new sign-in never happens. Await this between the two halves. |
 | `CdpState` | `{ evmAddress, evmEoaAddress, initialized, signedIn }`. |
 
 ### Coinbase Smart Wallet signature wrapping
@@ -182,6 +183,50 @@ Pure helpers + constants.
 | `coinbaseFactoryInterface` | ethers `Interface` for the factory (`createAccount` / `getAddress`). |
 | `CDP_SMART_ACCOUNT_FACTORY` | The CDP embedded-wallet smart-account factory address — **not** the public Coinbase Smart Wallet factory; CDP uses a sibling factory with a different account implementation. |
 | `ERC6492_MAGIC` | The 32-byte ERC-6492 magic suffix a supporting verifier checks for. |
+
+### Error recovery
+
+Two CDP failures the SDK does not surface usefully on its own.
+
+| Export | Description |
+|---|---|
+| `isAlreadyLinkedError(e)` | True when CDP refused to link an email or phone because it belongs to a **different** CDP user. It surfaces at the *verify* step, after the code was sent, and carries no `code` field — so a handler keyed on `code` reports a generic "wrong code" for a contact that is simply taken, and the user retries the OTP forever. Matches all three shapes CDP uses: `code: 'METHOD_ALREADY_LINKED'`, `errorType: 'already_exists'`, and the message text. |
+| `isAttestationWedgeError(msg)` | True for the iOS App Attest rejection below. |
+| `healAttestationWedge(projectId)` | Clear the dead key and run attest + register so the device holds a key the backend knows. Returns false rather than throwing. |
+| `withAttestationHeal(fn, projectId)` | Run a CDP auth call; on the wedge error, heal once and retry. A failed heal rethrows the original. |
+
+The App Attest wedge is permanent without this. `@coinbase/cdp-app-attest`
+caches its key ID in the Keychain the moment the key is generated — before
+Apple attestation and backend registration have succeeded — and
+`createAssertion` signs with that cached key regardless of registration state.
+The Keychain survives uninstall, so **one** failed registration leaves the
+device sending assertions the backend rejects forever:
+
+```
+Attestation Key Not registered. Please re-register the device
+```
+
+The SDK's own retry covers a 404 thrown from assertion generation and Apple's
+`devicecheck error 2` — neither fires here, because the rejection arrives on
+the auth endpoint. So it never self-heals.
+
+Healing is safe by construction: it runs only after the backend has already
+rejected the stored key, so that key has no standing to lose. The account
+credential is the SMS/email OTP — the attestation key is a device-integrity
+gate, not an account key — and clearing it touches neither the refresh token
+nor any wallet material.
+
+```ts
+const user = await withAttestationHeal(
+  () => signInWithSms({ phoneNumber }),
+  cdpProjectId,
+);
+```
+
+`@coinbase/cdp-app-attest` and `@coinbase/cdp-api-client` are **optional**
+peers: both are required lazily inside the heal, never at module load, so a
+host without App Attest (a simulator, a sideload, an Android-only app) pulls in
+neither and cannot raise the wedge error in the first place.
 
 ## Host setup (bare RN, New Architecture)
 

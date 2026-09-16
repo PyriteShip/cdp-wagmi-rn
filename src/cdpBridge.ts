@@ -86,6 +86,33 @@ export function waitForCdpAddress(timeoutMs = 15000): Promise<string> {
 }
 
 /**
+ * The mirror of `waitForCdpAddress`: resolve once the bridge reports signed
+ * out, or when `timeoutMs` elapses — never rejects, since a caller tearing a
+ * session down has nothing better to do on a timeout than proceed.
+ *
+ * Re-authenticating means signing out and straight back in, and the connector
+ * adopts whatever session the bridge is reporting. Reconnecting before the
+ * sign-out has propagated through CDP's React state therefore re-adopts the
+ * session being torn down, and the new sign-in never happens. Await this
+ * between the two halves.
+ */
+export function waitForCdpSignedOut(timeoutMs = 5000): Promise<void> {
+  if (!state.signedIn) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      unsub();
+      resolve();
+    }, timeoutMs);
+    const unsub = subscribeCdpState((s) => {
+      if (s.signedIn) return;
+      clearTimeout(timer);
+      unsub();
+      resolve();
+    });
+  });
+}
+
+/**
  * Resolve with the bridge state once `<CdpStateBinder>` has hydrated it
  * (`initialized` true), or with whatever is there when `timeoutMs` elapses.
  * wagmi's cold-start autoConnect calls `isAuthorized()` before the React tree

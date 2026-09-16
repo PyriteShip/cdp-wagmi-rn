@@ -10,6 +10,7 @@ import {
   setCdpState,
   subscribeCdpState,
   waitForCdpAddress,
+  waitForCdpSignedOut,
 } from './cdpBridge';
 
 // Reset the singleton to signed-out between tests.
@@ -88,6 +89,33 @@ describe('waitForCdpAddress', () => {
       const settled = expect(p).rejects.toThrow(/Timed out/);
       jest.advanceTimersByTime(1000);
       await settled;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('waitForCdpSignedOut', () => {
+  test('resolves immediately when already signed out', async () => {
+    await expect(waitForCdpSignedOut()).resolves.toBeUndefined();
+  });
+
+  test('resolves once the bridge reports the sign-out', async () => {
+    setCdpState({ signedIn: true, evmAddress: '0xabc' });
+    const p = waitForCdpSignedOut();
+    setCdpState({ signedIn: false, evmAddress: null });
+    await expect(p).resolves.toBeUndefined();
+  });
+
+  test('resolves rather than rejecting when the sign-out never lands', async () => {
+    // A caller tearing a session down has nothing better to do on a timeout
+    // than proceed, so this is the one waiter that must not reject.
+    setCdpState({ signedIn: true });
+    jest.useFakeTimers();
+    try {
+      const p = waitForCdpSignedOut(5000);
+      jest.advanceTimersByTime(5000);
+      await expect(p).resolves.toBeUndefined();
     } finally {
       jest.useRealTimers();
     }
