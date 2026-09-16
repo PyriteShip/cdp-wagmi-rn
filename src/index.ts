@@ -39,6 +39,7 @@ export {
   setCdpState,
   subscribeCdpState,
   waitForCdpAddress,
+  waitForCdpSignedOut,
   type CdpState,
 } from './cdpBridge';
 

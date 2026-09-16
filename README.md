@@ -165,6 +165,7 @@ from a binder component that reads the CDP hooks.
 | `setCdpState(patch)` | Patch the bridged state; notifies subscribers on change. |
 | `subscribeCdpState(cb)` | Observe state changes; returns an unsubscribe function. |
 | `waitForCdpAddress(timeoutMs?)` | Resolves once `evmAddress` is non-null (the post-sign-in handoff); 15 s default timeout. |
+| `waitForCdpSignedOut(timeoutMs?)` | The mirror: resolve once the bridge reports signed out, or on timeout — it never rejects. Re-authenticating means signing out and straight back in, and the connector adopts whatever session the bridge reports, so reconnecting before the sign-out has propagated re-adopts the session being torn down and the new sign-in never happens. Await this between the two halves. |
 | `CdpState` | `{ evmAddress, evmEoaAddress, initialized, signedIn }`. |
 
 ### Coinbase Smart Wallet signature wrapping
