@@ -173,7 +173,7 @@ export async function cdpSignTypedData(
 /**
  * Execute one or more calls as a single sponsored UserOperation and return the
  * on-chain transaction hash once the bundler includes it. Throws if the userOp
- * is dropped or times out.
+ * is dropped, fails, or times out.
  *
  * (Send/poll logic lifted from the former `CdpEthersSigner.sendTransaction` +
  * `waitForUserOpTransactionHash`. Returns the hash only; callers that need an
@@ -198,6 +198,30 @@ export async function cdpSendCalls(
   return waitForUserOpTransactionHash(op.userOperationHash, smartAccount, opts);
 }
 
+/**
+ * A UserOperation that CDP reports as `failed` or `dropped`.
+ *
+ * `failed` means the operation was included but its calls reverted, so
+ * `transactionHash` names the bundle transaction whose receipt records the
+ * revert. `dropped` means it was never included, and `transactionHash` is
+ * unset.
+ */
+export class CdpUserOperationFailedError extends Error {
+  readonly userOperationHash: string;
+  readonly status: 'failed' | 'dropped';
+  readonly transactionHash: string | undefined;
+
+  constructor(userOperationHash: string, status: 'failed' | 'dropped', transactionHash?: string) {
+    super(
+      `CDP UserOp ${userOperationHash} ${status}${transactionHash ? ` (tx ${transactionHash})` : ''}`,
+    );
+    this.name = 'CdpUserOperationFailedError';
+    this.userOperationHash = userOperationHash;
+    this.status = status;
+    this.transactionHash = transactionHash;
+  }
+}
+
 export async function waitForUserOpTransactionHash(
   userOpHash: string,
   smartAccount: string,
@@ -210,10 +234,13 @@ export async function waitForUserOpTransactionHash(
       evmSmartAccount: smartAccount as `0x${string}`,
       network: opts.cdpNetwork,
     });
-    if (state.transactionHash) return state.transactionHash;
-    if (state.status === 'dropped') {
-      throw new Error(`CDP UserOp ${userOpHash} ${state.status}`);
+    // A failed userOp can still carry a transactionHash: the bundle
+    // transaction mined, but the operation's own calls reverted inside it. The
+    // status check comes first so that outcome is never returned as a hash.
+    if (state.status === 'failed' || state.status === 'dropped') {
+      throw new CdpUserOperationFailedError(userOpHash, state.status, state.transactionHash || undefined);
     }
+    if (state.transactionHash) return state.transactionHash;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   throw new Error(`CDP UserOp ${userOpHash} timed out waiting for inclusion`);

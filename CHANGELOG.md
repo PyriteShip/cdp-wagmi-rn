@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- `cdpSendCalls` / `waitForUserOpTransactionHash` returned the transaction hash of a
+  userOp whose status was `failed`, so `eth_sendTransaction` and `wallet_sendCalls`
+  reported a reverted operation as sent. A `failed` status now throws, like `dropped`.
+
+### Added
+- `CdpUserOperationFailedError`, thrown for a `failed` or `dropped` userOp, with
+  readonly `userOperationHash`, `status` and `transactionHash` (set when the op was
+  included), so a consumer can fetch the receipt and decode the revert itself.
 
 ## [0.0.2] - 2026-09-08
 ### Fixed

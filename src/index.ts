@@ -29,6 +29,7 @@ export {
   cdpSignTypedData,
   cdpSendCalls,
   waitForUserOpTransactionHash,
+  CdpUserOperationFailedError,
   type CdpCall,
 } from './cdpAccount';
 
