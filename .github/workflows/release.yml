@@ -21,6 +21,20 @@ jobs:
       id-token: write   # OIDC token for npm trusted publishing + provenance
     steps:
       - uses: actions/checkout@v6
+      # A tag name feeds nothing into the publish — npm takes the version from
+      # package.json — so the two drift silently, and a tag cut before the
+      # version bump publishes the previous version under the new tag's name.
+      # The mismatch otherwise surfaces only as one `npm notice version:` line
+      # under the tarball's file listing. Fail before the build instead.
+      - name: Tag must match the version being published
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME would publish $pkg. Bump package.json to $tag, or retag as v$pkg."
+            exit 1
+          fi
+          echo "Publishing $pkg as $GITHUB_REF_NAME"
       - uses: actions/setup-node@v6
         with: { node-version: 22, cache: npm, registry-url: 'https://registry.npmjs.org' }
       - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
