@@ -54,3 +54,14 @@ export {
   CDP_SMART_ACCOUNT_FACTORY,
   ERC6492_MAGIC,
 } from './cdpCswWrap';
+
+// Recovery from two CDP failures the SDK does not surface usefully on its own:
+// a contact already linked to a different CDP user (reported at the verify
+// step with no `code` field), and an iOS App Attest key the backend has
+// rejected (which the SDK's own retry does not cover — see cdpAttestHeal).
+export { isAlreadyLinkedError } from './cdpLinkErrors';
+export {
+  isAttestationWedgeError,
+  healAttestationWedge,
+  withAttestationHeal,
+} from './cdpAttestHeal';
