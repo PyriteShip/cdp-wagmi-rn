@@ -57,9 +57,7 @@
   "peerDependencies": {
     "@coinbase/cdp-core": ">=0.0.37 <0.1.0",
     "@wagmi/core": "^2 || ^3",
-    "ethers": "^6",
-    "@coinbase/cdp-app-attest": "*",
-    "@coinbase/cdp-api-client": "*"
+    "ethers": "^6"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
@@ -104,13 +102,5 @@
   },
   "publishConfig": {
     "access": "public"
-  },
-  "peerDependenciesMeta": {
-    "@coinbase/cdp-app-attest": {
-      "optional": true
-    },
-    "@coinbase/cdp-api-client": {
-      "optional": true
-    }
   }
 }
