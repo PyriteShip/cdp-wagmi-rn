@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.0.4] - 2026-09-16
 ### Fixed
 - `cdpSendCalls` / `waitForUserOpTransactionHash` returned the transaction hash of a
   userOp whose status was `failed`, so `eth_sendTransaction` and `wallet_sendCalls`
