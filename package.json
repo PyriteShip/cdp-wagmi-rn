@@ -1,6 +1,6 @@
 {
   "name": "cdp-wagmi-rn",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Coinbase CDP embedded smart-account wallet as a bare-React-Native wagmi connector (New Architecture), with Coinbase Smart Wallet ERC-1271 / ERC-6492 signing.",
   "license": "MIT",
   "author": "Greg Taschuk (https://github.com/gregtaschuk)",
