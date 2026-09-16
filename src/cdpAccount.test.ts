@@ -52,6 +52,20 @@ test('cdpSendCalls sends a sponsored userOp on the given network and returns the
   expect(cdpCore.getUserOperation).toHaveBeenCalled();
 });
 
+test('cdpSendCalls throws when the userOp was included but failed', async () => {
+  (cdpCore.getUserOperation as jest.Mock).mockResolvedValueOnce({ status: 'failed', transactionHash: '0xTX' });
+  const sent = cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' });
+  await expect(sent).rejects.toThrow(/0xUOP/);
+  await expect(sent).rejects.toThrow(/failed/);
+});
+
+test('cdpSendCalls throws on a failed userOp that carries no tx hash', async () => {
+  (cdpCore.getUserOperation as jest.Mock).mockResolvedValueOnce({ status: 'failed' });
+  await expect(
+    cdpSendCalls([{ to: '0xTo' }], '0xSmart', { cdpNetwork: 'base-sepolia' }),
+  ).rejects.toThrow('CDP UserOp 0xUOP failed');
+});
+
 test('cdpSignTypedData wraps via CSW (using opts.chainId) and signs with the owner EOA', async () => {
   const sig = await cdpSignTypedData(
     { name: 'ToolRentalEscrow', version: '1' },

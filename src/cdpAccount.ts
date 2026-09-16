@@ -173,7 +173,7 @@ export async function cdpSignTypedData(
 /**
  * Execute one or more calls as a single sponsored UserOperation and return the
  * on-chain transaction hash once the bundler includes it. Throws if the userOp
- * is dropped or times out.
+ * is dropped, fails, or times out.
  *
  * (Send/poll logic lifted from the former `CdpEthersSigner.sendTransaction` +
  * `waitForUserOpTransactionHash`. Returns the hash only; callers that need an
@@ -210,10 +210,14 @@ export async function waitForUserOpTransactionHash(
       evmSmartAccount: smartAccount as `0x${string}`,
       network: opts.cdpNetwork,
     });
-    if (state.transactionHash) return state.transactionHash;
-    if (state.status === 'dropped') {
-      throw new Error(`CDP UserOp ${userOpHash} ${state.status}`);
+    // A failed userOp can still carry a transactionHash: the bundle
+    // transaction mined, but the operation's own calls reverted inside it. The
+    // status check comes first so that outcome is never returned as a hash.
+    if (state.status === 'failed' || state.status === 'dropped') {
+      const tx = state.transactionHash ? ` (tx ${state.transactionHash})` : '';
+      throw new Error(`CDP UserOp ${userOpHash} ${state.status}${tx}`);
     }
+    if (state.transactionHash) return state.transactionHash;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   throw new Error(`CDP UserOp ${userOpHash} timed out waiting for inclusion`);
