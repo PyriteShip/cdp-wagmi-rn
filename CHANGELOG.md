@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.0.5] - 2026-09-23
 ### Added
 - EIP-1193 provider error codes. The provider throws `CdpProviderRpcError` with
   4001 when the user closes a cdp-core MFA prompt, 4100 when no session is signed
