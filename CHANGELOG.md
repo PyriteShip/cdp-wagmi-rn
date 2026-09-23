@@ -1,6 +1,22 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- EIP-1193 provider error codes. The provider throws `CdpProviderRpcError` with
+  4001 when the user closes a cdp-core MFA prompt, 4100 when no session is signed
+  in or MFA did not complete, 4200 for signing methods a smart account cannot serve
+  and unhandled `wallet_*` methods, 4900 when CDP's signing service is unavailable,
+  and 4901 for a request naming another chain. Exported with `PROVIDER_ERROR_CODES`
+  and `toProviderRpcError`. `CdpUserOperationFailedError` and unclassified CDP
+  errors reach the caller unchanged.
+- `wallet_switchEthereumChain`: `null` for `cfg.chainId`, 4901 for any other chain.
+
+### Changed
+- `eth_accounts` returns `[]` with no signed-in session instead of `['']`.
+- `eth_sign`, `eth_signTransaction`, `eth_signTypedData` / `_v1` / `_v3` and unhandled
+  `wallet_*` methods are rejected (4200) instead of forwarded to the read provider.
+- `wallet_sendCalls` and `eth_sendTransaction` reject a `chainId` other than
+  `cfg.chainId` (4901) instead of sending on the configured chain.
 
 ## [0.0.4] - 2026-09-16
 ### Fixed

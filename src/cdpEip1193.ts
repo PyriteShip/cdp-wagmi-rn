@@ -11,6 +11,12 @@
  * everything else (reads) to an injected ethers provider. Smart-account sends
  * are exposed both as legacy `eth_sendTransaction` and as EIP-5792
  * `wallet_sendCalls` (the idiomatic account-abstraction path wagmi prefers).
+ *
+ * Failures carry EIP-1193 provider error codes (see `providerErrors.ts`): 4001
+ * when the user closes the MFA prompt, 4100 when there is no signed-in account
+ * or the request was never verified, 4200 for a method this wallet cannot
+ * serve, 4900 when the CDP signing service is unreachable, and 4901 for a
+ * request naming a chain other than `cfg.chainId`.
  */
 
 import { ethers } from 'ethers';
@@ -23,11 +29,36 @@ import {
   type CdpCall,
 } from './cdpAccount';
 import type { CdpWalletConfig } from './cdpConfig';
+import { providerRpcError, toProviderRpcError } from './providerErrors';
 
 interface Params {
   smartAccount: string;
   readProvider: ethers.Provider;
   cfg: CdpWalletConfig;
+}
+
+/**
+ * Signing methods a smart account cannot serve: `eth_sign` signs raw hashes (a
+ * phishing vector every major wallet disables), a smart account has no
+ * transaction of its own to sign, and v1/v3 typed data predate the v4 encoding
+ * the ERC-1271 envelope wraps. Rejected here so they never reach the read
+ * provider, which would answer for an account it does not hold.
+ */
+const UNSUPPORTED_METHODS = new Set([
+  'eth_sign',
+  'eth_signTransaction',
+  'eth_signTypedData',
+  'eth_signTypedData_v1',
+  'eth_signTypedData_v3',
+]);
+
+/** Parses an EIP-155 chain id given as hex or decimal; undefined when absent. */
+function parseChainId(v: unknown): number | undefined {
+  if (v == null || v === '') return undefined;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'bigint') return Number(v);
+  if (typeof v === 'string') return Number(v.startsWith('0x') || v.startsWith('0X') ? BigInt(v) : v);
+  return NaN;
 }
 
 function toBigIntOrUndefined(v: unknown): bigint | undefined {
@@ -56,18 +87,44 @@ export function createCdpEip1193Provider({ smartAccount, readProvider, cfg }: Pa
     send?: (method: string, params: any[]) => Promise<any>;
   }).send?.bind(readProvider);
 
-  async function request({ method, params }: { method: string; params?: any[] | Record<string, any> }): Promise<any> {
+  /** Rejects a request that names a chain this wallet is not connected to. */
+  function assertChain(requested: unknown): void {
+    const id = parseChainId(requested);
+    if (id !== undefined && id !== cfg.chainId) {
+      throw providerRpcError(4901, `Requested chain ${String(requested)}, connected to ${cfg.chainId}.`);
+    }
+  }
+
+  async function request(args: { method: string; params?: any[] | Record<string, any> }): Promise<any> {
+    try {
+      return await route(args);
+    } catch (err) {
+      throw toProviderRpcError(err);
+    }
+  }
+
+  async function route({ method, params }: { method: string; params?: any[] | Record<string, any> }): Promise<any> {
     const p = (Array.isArray(params) ? params : []) as any[];
+    if (UNSUPPORTED_METHODS.has(method)) throw providerRpcError(4200, `"${method}"`);
     // Resolve the smart-account address LIVE per request (from the CDP bridge),
     // not the value captured when this provider was built. wagmi may call
     // getProvider() before the bridge has surfaced the address, so the captured
     // `smartAccount` can be '' — which would land as an empty verifyingContract /
     // evmAccount and fail CDP's address-schema validation.
     const account = cdpGetAddress(smartAccount);
+    // Every method that acts as the account needs one; with no CDP session
+    // there is nothing to sign with, and passing '' on fails CDP's address
+    // schema with an error that reads like a bug rather than "signed out".
+    const requireAccount = () => {
+      if (!account) throw providerRpcError(4100, 'No CDP session is signed in.');
+      return account;
+    };
     switch (method) {
       case 'eth_accounts':
+        return account ? [account] : [];
+
       case 'eth_requestAccounts':
-        return [account];
+        return [requireAccount()];
 
       case 'eth_chainId':
         return CHAIN_ID_HEX;
@@ -75,24 +132,30 @@ export function createCdpEip1193Provider({ smartAccount, readProvider, cfg }: Pa
       case 'personal_sign': {
         // params: [message, address]. Message is hex-encoded data per spec;
         // pass raw bytes when hex so the EIP-191 hash matches.
+        requireAccount();
         const raw = p[0];
         const message = typeof raw === 'string' && raw.startsWith('0x') ? ethers.getBytes(raw) : raw;
-        return cdpSignMessage(message, account, readProvider, signOpts);
+        return await cdpSignMessage(message, account, readProvider, signOpts);
       }
 
       case 'eth_signTypedData_v4': {
         // params: [address, typedDataJSONorObject]
+        requireAccount();
         const td = typeof p[1] === 'string' ? JSON.parse(p[1]) : p[1];
-        return cdpSignTypedData(td.domain, td.types, td.message, account, signOpts);
+        return await cdpSignTypedData(td.domain, td.types, td.message, account, signOpts);
       }
 
       case 'eth_sendTransaction': {
-        return cdpSendCalls([toCdpCall(p[0])], account, sendOpts);
+        requireAccount();
+        assertChain(p[0]?.chainId);
+        return await cdpSendCalls([toCdpCall(p[0])], account, sendOpts);
       }
 
       // ── EIP-5792 (the AA-native path wagmi's useSendCalls uses) ──────────
       case 'wallet_sendCalls': {
+        requireAccount();
         const req = p[0] ?? {};
+        assertChain(req.chainId);
         const calls = (req.calls ?? []).map(toCdpCall);
         const txHash = await cdpSendCalls(calls, account, sendOpts);
         return { id: txHash };
@@ -130,11 +193,18 @@ export function createCdpEip1193Provider({ smartAccount, readProvider, cfg }: Pa
           },
         };
 
+      // A wallet on one chain: switching to it is a no-op, switching away is
+      // not possible.
+      case 'wallet_switchEthereumChain':
+        assertChain(p[0]?.chainId);
+        return null;
+
       default: {
-        if (!passthrough) {
-          throw new Error(`cdpEip1193: unsupported method "${method}" (no read provider)`);
-        }
-        return passthrough(method, p);
+        // Wallet methods are this provider's to answer; the read provider is a
+        // node and would answer for an account it does not hold.
+        if (method.startsWith('wallet_')) throw providerRpcError(4200, `"${method}"`);
+        if (!passthrough) throw providerRpcError(4200, `"${method}" (no read provider).`);
+        return await passthrough(method, p);
       }
     }
   }

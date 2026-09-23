@@ -139,6 +139,25 @@ const sig = await cdpSignMessage(message, smartAccount, readProvider, { chainId:
 | Export | Description |
 |---|---|
 | `createCdpEip1193Provider({ smartAccount, readProvider, cfg })` | EIP-1193 provider for non-wagmi consumers: routes `personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction`, and EIP-5792 `wallet_sendCalls` / `wallet_getCallsStatus` / `wallet_getCapabilities` to the CDP core, and forwards reads to the injected ethers provider. |
+| `CdpProviderRpcError` | The EIP-1193 `ProviderRpcError` the provider throws: `code`, `message`, `data` (`{ source, reason, statusCode? }` naming the CDP error), and `cause` (that error). |
+| `PROVIDER_ERROR_CODES` | `{ userRejectedRequest: 4001, unauthorized: 4100, unsupportedMethod: 4200, disconnected: 4900, chainDisconnected: 4901 }`. |
+| `toProviderRpcError(err)` | The classifier the provider applies; returns anything it does not recognise unchanged. |
+
+#### Errors
+
+viem maps each code to a typed error (`UserRejectedRequestError`, `UnauthorizedProviderError`, `UnsupportedProviderMethodError`, `ProviderDisconnectedError`, `ChainDisconnectedError`), so a wagmi consumer checks the class rather than parsing CDP's messages.
+
+| Code | Thrown when |
+|---|---|
+| 4001 | The user closed the MFA verification prompt (cdp-core `MfaError` `CANCELLED`). |
+| 4100 | No CDP session is signed in; an MFA verification did not complete (`SUPERSEDED` by a newer prompt, `LISTENER_REQUIRED` / `NO_LISTENER_MATCHED` — no MFA listener registered); or CDP answered `unauthorized`, `forbidden` or an `mfa_*` error. |
+| 4200 | `eth_sign`, `eth_signTransaction`, `eth_signTypedData` / `_v1` / `_v3`, any `wallet_*` method not listed above, or a read with no read provider. None of these are forwarded to the read provider. |
+| 4900 | CDP answered `service_unavailable`, `bad_gateway` or `endpoint_unavailable`. |
+| 4901 | `wallet_sendCalls`, `eth_sendTransaction` or `wallet_switchEthereumChain` named a `chainId` other than `cfg.chainId`, or CDP answered `network_mismatch`. `wallet_switchEthereumChain` to `cfg.chainId` returns `null`. |
+
+Everything else reaches the caller unchanged — notably `CdpUserOperationFailedError`, for decoding the revert, and CDP errors such as `rate_limit_exceeded` or `timed_out` that have no EIP-1193 meaning.
+
+**MFA.** cdp-core runs the MFA prompt inside the signing calls this provider makes, so a host enrolls users and registers the listener (`registerMfaListener`, cdp-core ≥ 0.0.119) and needs nothing from this package. Two signing calls that overlap while a prompt is open cancel the first with `SUPERSEDED` (4100 here); a host flow that signs more than once should call cdp-core's `ensureMfaVerified()` before it starts.
 
 ### CDP capability core
 
