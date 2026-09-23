@@ -135,3 +135,122 @@ test('unknown methods forward to the read provider', async () => {
   expect(res).toBe('0xread');
   expect(readProvider.send).toHaveBeenCalledWith('eth_getBalance', ['0xabc', 'latest']);
 });
+
+describe('EIP-1193 provider errors', () => {
+  function mfaError(code: string) {
+    const err = new Error(`mfa ${code}`) as Error & { code: string };
+    err.name = 'MfaError';
+    err.code = code;
+    return err;
+  }
+
+  test.each([
+    ['personal_sign', ['0xdeadbeef', '0xSmartAccount'], core.cdpSignMessage],
+    ['eth_signTypedData_v4', ['0xSmartAccount', { domain: {}, types: { Foo: [] }, message: {} }], core.cdpSignTypedData],
+    ['eth_sendTransaction', [{ to: '0xTo' }], core.cdpSendCalls],
+    ['wallet_sendCalls', [{ calls: [{ to: '0xTo' }] }], core.cdpSendCalls],
+  ])('%s: a cancelled MFA prompt rejects with 4001', async (method, params, fn) => {
+    (fn as jest.Mock).mockRejectedValueOnce(mfaError('CANCELLED'));
+    const { provider } = makeProvider();
+    await expect(provider.request({ method, params })).rejects.toMatchObject({
+      code: 4001,
+      data: { source: 'MfaError', reason: 'CANCELLED' },
+    });
+  });
+
+  test('a superseded MFA prompt rejects with 4100, not as a user rejection', async () => {
+    (core.cdpSignMessage as jest.Mock).mockRejectedValueOnce(mfaError('SUPERSEDED'));
+    const { provider } = makeProvider();
+    await expect(
+      provider.request({ method: 'personal_sign', params: ['0xdeadbeef', '0xSmartAccount'] }),
+    ).rejects.toMatchObject({ code: 4100 });
+  });
+
+  test('a failed userOp reaches the caller unchanged', async () => {
+    const failure = new Error('userOp failed');
+    (core.cdpSendCalls as jest.Mock).mockRejectedValueOnce(failure);
+    const { provider } = makeProvider();
+    await expect(
+      provider.request({ method: 'wallet_sendCalls', params: [{ calls: [{ to: '0xTo' }] }] }),
+    ).rejects.toBe(failure);
+  });
+
+  describe('signed out (no account)', () => {
+    beforeEach(() => (core.cdpGetAddress as jest.Mock).mockReturnValue(''));
+    afterEach(() => (core.cdpGetAddress as jest.Mock).mockReturnValue('0xSmartAccount'));
+
+    test('eth_accounts is empty rather than holding an empty address', async () => {
+      const { provider } = makeProvider();
+      expect(await provider.request({ method: 'eth_accounts' })).toEqual([]);
+    });
+
+    test.each([
+      ['eth_requestAccounts', []],
+      ['personal_sign', ['0xdeadbeef', '0x']],
+      ['eth_signTypedData_v4', ['0x', { domain: {}, types: { Foo: [] }, message: {} }]],
+      ['eth_sendTransaction', [{ to: '0xTo' }]],
+      ['wallet_sendCalls', [{ calls: [{ to: '0xTo' }] }]],
+    ])('%s rejects with 4100 without calling CDP', async (method, params) => {
+      const { provider } = makeProvider();
+      await expect(provider.request({ method, params })).rejects.toMatchObject({ code: 4100 });
+      expect(core.cdpSignMessage).not.toHaveBeenCalled();
+      expect(core.cdpSignTypedData).not.toHaveBeenCalled();
+      expect(core.cdpSendCalls).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each([
+    'eth_sign',
+    'eth_signTransaction',
+    'eth_signTypedData',
+    'eth_signTypedData_v1',
+    'eth_signTypedData_v3',
+    'wallet_addEthereumChain',
+    'wallet_watchAsset',
+  ])('%s rejects with 4200 and is not forwarded to the read provider', async (method) => {
+    const { provider, readProvider } = makeProvider();
+    await expect(provider.request({ method, params: [] })).rejects.toMatchObject({ code: 4200 });
+    expect(readProvider.send).not.toHaveBeenCalled();
+  });
+
+  test('a read with no read provider rejects with 4200', async () => {
+    const provider = createCdpEip1193Provider({
+      smartAccount: '0xSmartAccount',
+      readProvider: {} as any,
+      cfg,
+    });
+    await expect(provider.request({ method: 'eth_getBalance', params: [] })).rejects.toMatchObject({
+      code: 4200,
+    });
+  });
+
+  test.each([
+    ['wallet_sendCalls', [{ chainId: '0x1', calls: [{ to: '0xTo' }] }]],
+    ['eth_sendTransaction', [{ to: '0xTo', chainId: '0x1' }]],
+    ['wallet_switchEthereumChain', [{ chainId: '0x1' }]],
+  ])('%s for another chain rejects with 4901 without calling CDP', async (method, params) => {
+    const { provider } = makeProvider();
+    await expect(provider.request({ method, params })).rejects.toMatchObject({ code: 4901 });
+    expect(core.cdpSendCalls).not.toHaveBeenCalled();
+  });
+
+  test('a chainId naming the configured chain is accepted in either form', async () => {
+    const { provider } = makeProvider();
+    await provider.request({
+      method: 'wallet_sendCalls',
+      params: [{ chainId: `0x${CHAIN_ID.toString(16).toUpperCase()}`, calls: [{ to: '0xTo' }] }],
+    });
+    await provider.request({ method: 'eth_sendTransaction', params: [{ to: '0xTo', chainId: CHAIN_ID }] });
+    expect(core.cdpSendCalls).toHaveBeenCalledTimes(2);
+  });
+
+  test('wallet_switchEthereumChain to the configured chain succeeds with null', async () => {
+    const { provider } = makeProvider();
+    expect(
+      await provider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: `0x${CHAIN_ID.toString(16)}` }],
+      }),
+    ).toBeNull();
+  });
+});

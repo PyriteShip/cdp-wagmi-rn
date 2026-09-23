@@ -21,6 +21,14 @@ export { cdpWagmiConnector, registerCdpAuthRequester } from './cdpWagmiConnector
 // EIP-1193 provider boundary (for non-wagmi consumers)
 export { createCdpEip1193Provider } from './cdpEip1193';
 
+// EIP-1193 provider errors (4001 / 4100 / 4200 / 4900 / 4901) the provider throws
+export {
+  CdpProviderRpcError,
+  PROVIDER_ERROR_CODES,
+  toProviderRpcError,
+  type ProviderErrorCode,
+} from './providerErrors';
+
 // CDP capability core (framework-agnostic; e.g. sign a message against a
 // specific verifier chain without going through the wagmi provider)
 export {
