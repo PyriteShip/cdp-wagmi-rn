@@ -13,13 +13,13 @@
  */
 
 // Config shapes
-export type { CdpWalletConfig, CdpSignOpts, CdpSendOpts } from './cdpConfig';
+export type { CdpWalletConfig, CdpSignOpts, CdpSendOpts, CdpReadClient } from './cdpConfig';
 
 // wagmi connector (the main entry point)
 export { cdpWagmiConnector, registerCdpAuthRequester } from './cdpWagmiConnector';
 
 // EIP-1193 provider boundary (for non-wagmi consumers)
-export { createCdpEip1193Provider } from './cdpEip1193';
+export { createCdpEip1193Provider, type CdpEip1193Provider } from './cdpEip1193';
 
 // EIP-1193 provider errors (4001 / 4100 / 4200 / 4900 / 4901) the provider throws
 export {
@@ -60,7 +60,8 @@ export {
   wrapErc6492,
   buildCoinbaseFactoryCalldata,
   encodeAddressOwner,
-  coinbaseFactoryInterface,
+  coinbaseFactoryAbi,
   CDP_SMART_ACCOUNT_FACTORY,
   ERC6492_MAGIC,
+  type TypedDataField,
 } from './cdpCswWrap';

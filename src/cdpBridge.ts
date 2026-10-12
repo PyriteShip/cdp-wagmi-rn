@@ -5,7 +5,7 @@
  * `<CdpStateBinder>` (mounted inside `<CDPHooksProvider>` in App.tsx)
  * reads `useEvmAddress()` + `useCurrentUser()` and writes their values
  * into this object via `setCdpState()`. Anything outside the React tree
- * (the connector class, the ethers signer adapter) reads via `getCdpState()`.
+ * (the connector and the capability core) reads via `getCdpState()`.
  *
  * Imperative actions (signEvmTypedData, sendUserOperation, getUserOperation,
  * signOut) come straight from `@coinbase/cdp-core` — they share the same

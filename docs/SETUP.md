@@ -77,8 +77,7 @@ const config = {
     resolveRequest: (context, moduleName, platform) => {
       // Alias the Node-only `ws` package to a shim that re-exports
       // global.WebSocket. CDP's Solana transitive chain pulls in `ws`, which
-      // would otherwise drag in zlib/net/tls/etc. (ethers v6 doesn't hit this
-      // path — its WebSocketProvider uses globalThis.WebSocket directly on RN.)
+      // would otherwise drag in zlib/net/tls/etc.
       if (moduleName === 'ws') {
         return { type: 'sourceFile', filePath: wsShim };
       }
@@ -101,7 +100,7 @@ The `ws` shim:
 ```js
 // src/shims/ws.js
 // React Native shim for the Node-only `ws` package. Everything maps to RN's
-// global WebSocket — the same one ethers v6's WebSocketProvider already uses.
+// global WebSocket.
 const WebSocket = global.WebSocket;
 
 module.exports = WebSocket;

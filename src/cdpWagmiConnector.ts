@@ -1,10 +1,8 @@
 /**
- * wagmi Connector for the CDP smart-account wallet — the nucleus of a future
- * standalone `cdp-wagmi-rn` package.
+ * wagmi Connector for the CDP smart-account wallet.
  *
- * It wraps the pieces PR #14 established: `createCdpEip1193Provider` (the EIP-1193
- * view of the CDP capability core) as `getProvider()`, and `cdpBridge` for the
- * session state. For now it runs in **adopt mode** — it reflects the CDP session
+ * It wraps `createCdpEip1193Provider` (the EIP-1193 view of the CDP capability
+ * core) as `getProvider()`, and `cdpBridge` for the session state. For now it runs in **adopt mode** — it reflects the CDP session
  * the app already established via `useWalletSession` rather than owning it:
  *   - `connect()` waits for the existing signed-in address (no modal).
  *   - `disconnect()` is a no-op (the app owns real sign-out; tearing down the
@@ -15,8 +13,8 @@
 
 import { createConnector } from '@wagmi/core';
 import type { CreateConnectorFn } from '@wagmi/core';
-import { ethers } from 'ethers';
-import { createCdpEip1193Provider } from './cdpEip1193';
+import { createPublicClient, http } from 'viem';
+import { createCdpEip1193Provider, type CdpEip1193Provider } from './cdpEip1193';
 import {
   getCdpState,
   setCdpState,
@@ -30,7 +28,6 @@ import {
   getCurrentUser as cdpGetCurrentUser,
 } from '@coinbase/cdp-core';
 import type { CdpWalletConfig } from './cdpConfig';
-import type { Eip1193Provider } from 'ethers';
 
 type Address = `0x${string}`;
 
@@ -98,19 +95,15 @@ export async function tryReviveCdpSession(): Promise<boolean> {
 
 export function cdpWagmiConnector(cfg: CdpWalletConfig): CreateConnectorFn {
   // Lazily-built singletons so getProvider() is stable across calls.
-  let provider: Eip1193Provider | null = null;
+  let provider: CdpEip1193Provider | null = null;
   let unsubscribe: (() => void) | null = null;
 
-  function getOrCreateProvider(): Eip1193Provider {
+  function getOrCreateProvider(): CdpEip1193Provider {
     if (!provider) {
-      const readProvider = new ethers.JsonRpcProvider(
-        cfg.rpcUrl,
-        { name: cfg.cdpNetwork, chainId: cfg.chainId },
-        { staticNetwork: true },
-      );
+      const readClient = createPublicClient({ transport: http(cfg.rpcUrl) });
       provider = createCdpEip1193Provider({
         smartAccount: getCdpState().evmAddress ?? '',
-        readProvider,
+        readClient,
         cfg,
       });
     }
