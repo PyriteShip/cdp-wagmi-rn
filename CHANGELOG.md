@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [0.0.6] - 2026-10-12
 ### Changed
 - **Breaking:** the package runs on viem, its peer dependency in place of ethers.
   `cdpSignMessage` and `createCdpEip1193Provider` take a `readClient` — any
