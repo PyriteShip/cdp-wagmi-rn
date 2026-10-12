@@ -18,12 +18,13 @@ const CHAIN_ID = 84532;
 const cfg: CdpWalletConfig = { chainId: CHAIN_ID, rpcUrl: 'http://localhost', cdpNetwork: 'base-sepolia' };
 
 function makeProvider() {
-  const readProvider = {
-    send: jest.fn(async () => '0xread'),
-    getTransactionReceipt: jest.fn(async () => null),
-  } as any;
-  const provider = createCdpEip1193Provider({ smartAccount: '0xSmartAccount', readProvider, cfg });
-  return { provider, readProvider };
+  const readClient = {
+    request: jest.fn(async ({ method }: { method: string }) =>
+      method === 'eth_getTransactionReceipt' ? null : '0xread',
+    ),
+  };
+  const provider = createCdpEip1193Provider({ smartAccount: '0xSmartAccount', readClient, cfg });
+  return { provider, readClient };
 }
 
 beforeEach(() => jest.clearAllMocks());
@@ -40,14 +41,14 @@ test('eth_chainId returns the configured chain', async () => {
 });
 
 test('personal_sign routes to cdpSignMessage with the provider chain envelope', async () => {
-  const { provider, readProvider } = makeProvider();
+  const { provider, readClient } = makeProvider();
   const sig = await provider.request({ method: 'personal_sign', params: ['0xdeadbeef', '0xSmartAccount'] });
   expect(sig).toBe('0xsigMsg');
   // A generic wallet signs messages against its own chain (cfg.chainId).
   expect(core.cdpSignMessage).toHaveBeenCalledWith(
     expect.anything(),
     '0xSmartAccount',
-    readProvider,
+    readClient,
     expect.objectContaining({ chainId: CHAIN_ID }),
   );
 });
@@ -60,7 +61,30 @@ test('eth_signTypedData_v4 parses JSON and routes to cdpSignTypedData', async ()
   expect(core.cdpSignTypedData).toHaveBeenCalledWith(
     td.domain, td.types, td.message, '0xSmartAccount',
     expect.objectContaining({ chainId: CHAIN_ID }),
+    undefined,
   );
+});
+
+test('eth_signTypedData_v4 passes the request primaryType through', async () => {
+  const { provider } = makeProvider();
+  const td = {
+    domain: { chainId: CHAIN_ID },
+    types: { Foo: [{ name: 'x', type: 'uint256' }] },
+    primaryType: 'Foo',
+    message: { x: 1 },
+  };
+  await provider.request({ method: 'eth_signTypedData_v4', params: ['0xSmartAccount', td] });
+  expect(core.cdpSignTypedData).toHaveBeenCalledWith(
+    td.domain, td.types, td.message, '0xSmartAccount', expect.anything(), 'Foo',
+  );
+});
+
+test('personal_sign passes a hex message as raw bytes and text as a string', async () => {
+  const { provider } = makeProvider();
+  await provider.request({ method: 'personal_sign', params: ['0xdeadbeef', '0xSmartAccount'] });
+  expect((core.cdpSignMessage as jest.Mock).mock.calls[0][0]).toEqual(new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+  await provider.request({ method: 'personal_sign', params: ['hello', '0xSmartAccount'] });
+  expect((core.cdpSignMessage as jest.Mock).mock.calls[1][0]).toBe('hello');
 });
 
 test('eth_sendTransaction maps to a single-call cdpSendCalls', async () => {
@@ -91,10 +115,10 @@ test('wallet_sendCalls (EIP-5792) batches and returns an id', async () => {
 });
 
 test('wallet_getCallsStatus returns PENDING with no receipts while unmined', async () => {
-  const { provider, readProvider } = makeProvider();
-  readProvider.getTransactionReceipt.mockResolvedValueOnce(null);
+  const { provider, readClient } = makeProvider();
   const res = await provider.request({ method: 'wallet_getCallsStatus', params: ['0xTxHash'] });
   expect(res).toEqual({ status: 'PENDING', receipts: [] });
+  expect(readClient.request).toHaveBeenCalledWith({ method: 'eth_getTransactionReceipt', params: ['0xTxHash'] });
 });
 
 test('wallet_getCallsStatus returns a viem-formattable receipt (gasUsed + logs present)', async () => {
@@ -103,16 +127,16 @@ test('wallet_getCallsStatus returns a viem-formattable receipt (gasUsed + logs p
   // handler omitted gasUsed, `hexToBigInt(undefined)` → `BigInt(undefined)` →
   // "Invalid argument to BigInt()" the instant a CDP batch (extend/start)
   // confirmed. Every field viem hex-decodes must be a present hex string.
-  const { provider, readProvider } = makeProvider();
+  const { provider, readClient } = makeProvider();
   const logs = [{ address: '0xEscrow', topics: ['0xtopic'], data: '0xdata' }];
-  readProvider.getTransactionReceipt.mockResolvedValueOnce({
-    hash: '0xTxHash',
+  readClient.request.mockResolvedValueOnce({
+    transactionHash: '0xTxHash',
     blockHash: '0xBlockHash',
-    blockNumber: 123,
-    status: 1,
-    gasUsed: 21000n,
+    blockNumber: '0x7b',
+    status: '0x1',
+    gasUsed: '0x5208',
     logs,
-  });
+  } as any);
   const res = await provider.request({ method: 'wallet_getCallsStatus', params: ['0xTxHash'] });
   const receipt = res.receipts[0];
   expect(receipt.gasUsed).toBe('0x5208'); // 21000 — the field that threw when undefined
@@ -130,10 +154,10 @@ test('wallet_getCapabilities advertises paymaster sponsorship', async () => {
 });
 
 test('unknown methods forward to the read provider', async () => {
-  const { provider, readProvider } = makeProvider();
+  const { provider, readClient } = makeProvider();
   const res = await provider.request({ method: 'eth_getBalance', params: ['0xabc', 'latest'] });
   expect(res).toBe('0xread');
-  expect(readProvider.send).toHaveBeenCalledWith('eth_getBalance', ['0xabc', 'latest']);
+  expect(readClient.request).toHaveBeenCalledWith({ method: 'eth_getBalance', params: ['0xabc', 'latest'] });
 });
 
 describe('EIP-1193 provider errors', () => {
@@ -208,15 +232,15 @@ describe('EIP-1193 provider errors', () => {
     'wallet_addEthereumChain',
     'wallet_watchAsset',
   ])('%s rejects with 4200 and is not forwarded to the read provider', async (method) => {
-    const { provider, readProvider } = makeProvider();
+    const { provider, readClient } = makeProvider();
     await expect(provider.request({ method, params: [] })).rejects.toMatchObject({ code: 4200 });
-    expect(readProvider.send).not.toHaveBeenCalled();
+    expect(readClient.request).not.toHaveBeenCalled();
   });
 
   test('a read with no read provider rejects with 4200', async () => {
     const provider = createCdpEip1193Provider({
       smartAccount: '0xSmartAccount',
-      readProvider: {} as any,
+      readClient: {} as any,
       cfg,
     });
     await expect(provider.request({ method: 'eth_getBalance', params: [] })).rejects.toMatchObject({

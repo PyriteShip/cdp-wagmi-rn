@@ -10,7 +10,7 @@ npm run build      # outputs to lib/
 npm run size       # bundlesize check
 ```
 
-The jest pipeline uses babel-jest with a node test environment. `@coinbase/cdp-core` and `@wagmi/core` are mocked in tests while `ethers` runs for real — no React Native runtime or emulator is required.
+The jest pipeline uses babel-jest with a node test environment. `@coinbase/cdp-core` and `@wagmi/core` are mocked in tests while `viem` runs for real — no React Native runtime or emulator is required. `ethers` is a dev dependency only: the CSW wrapping tests check each viem encoding against ethers' as an independent reference.
 
 ## PR expectations
 

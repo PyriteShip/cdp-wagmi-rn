@@ -1,12 +1,15 @@
 /**
  * Tests for the CSW (Coinbase Smart Wallet) signature wrapping helpers in
- * `cdp.ts`. These are the load-bearing pure-logic pieces that bridge our
+ * `cdpCswWrap.ts`. These are the load-bearing pure-logic pieces that bridge
  * EIP-712 offer signing to what CSW's on-chain `_isValidSignature` accepts.
  *
- * Why pure-logic only: standing up the full CdpEthersSigner needs the CDP
- * SDK's auth state, which isn't available in jest. Both helpers are
- * deterministic, so unit tests catch the wrap-format bugs that previously
- * surfaced only on-chain ("RentalEscrow: invalid offer signature").
+ * Why pure-logic only: signing needs the CDP SDK's auth state, which isn't
+ * available in jest. The helpers are deterministic, so unit tests catch the
+ * wrap-format bugs that otherwise surface only on-chain ("RentalEscrow:
+ * invalid offer signature").
+ *
+ * ethers is the independent reference: the helpers encode with viem, and each
+ * encoding is checked against ethers' own encoder or decoder.
  */
 
 import { ethers } from 'ethers';
@@ -16,12 +19,15 @@ import {
   wrapErc6492,
   encodeAddressOwner,
   buildCoinbaseFactoryCalldata,
-  coinbaseFactoryInterface,
   ERC6492_MAGIC,
   CDP_SMART_ACCOUNT_FACTORY,
 } from './cdpCswWrap';
 
 const SMART_ACCOUNT = '0x1234567890123456789012345678901234567890';
+
+const ETHERS_FACTORY_INTERFACE = new ethers.Interface([
+  'function createAccount(bytes[] owners, uint256 nonce) payable returns (address)',
+]);
 const CHAIN_ID = 84532;
 
 // A representative RentalOffer matches `signedOffer.ts`'s EIP712_TYPES.
@@ -163,15 +169,88 @@ describe('buildCswReplaySafeTypedData', () => {
       ],
       ...RENTAL_OFFER_TYPES,
     };
+    const envelope = buildCswReplaySafeTypedData({
+      originalDomain: RENTAL_OFFER_DOMAIN,
+      originalTypes: typesWithDomain,
+      originalValue: SAMPLE_OFFER,
+      smartAccount: SMART_ACCOUNT,
+      chainId: CHAIN_ID,
+    });
+    expect(envelope.message.hash).toBe(
+      ethers.TypedDataEncoder.hash(RENTAL_OFFER_DOMAIN, RENTAL_OFFER_TYPES, SAMPLE_OFFER),
+    );
+  });
+
+  // A nested struct listed before its parent: the struct being signed is the
+  // one no other type references, not the first key.
+  const MAIL_TYPES = {
+    Person: [
+      { name: 'name', type: 'string' },
+      { name: 'wallet', type: 'address' },
+    ],
+    Mail: [
+      { name: 'from', type: 'Person' },
+      { name: 'to', type: 'Person[]' },
+      { name: 'contents', type: 'string' },
+    ],
+  };
+  const MAIL = {
+    from: { name: 'Cow', wallet: '0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826' },
+    to: [{ name: 'Bob', wallet: '0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB' }],
+    contents: 'Hello, Bob!',
+  };
+
+  test('hashes the root struct of nested types, matching ethers', () => {
+    const envelope = buildCswReplaySafeTypedData({
+      originalDomain: RENTAL_OFFER_DOMAIN,
+      originalTypes: MAIL_TYPES,
+      originalValue: MAIL,
+      smartAccount: SMART_ACCOUNT,
+      chainId: CHAIN_ID,
+    });
+    expect(envelope.message.hash).toBe(ethers.TypedDataEncoder.hash(RENTAL_OFFER_DOMAIN, MAIL_TYPES, MAIL));
+  });
+
+  test('an explicit primaryType selects the struct being signed', () => {
+    const person = MAIL.from;
+    const envelope = buildCswReplaySafeTypedData({
+      originalDomain: RENTAL_OFFER_DOMAIN,
+      originalTypes: MAIL_TYPES,
+      originalValue: person,
+      originalPrimaryType: 'Person',
+      smartAccount: SMART_ACCOUNT,
+      chainId: CHAIN_ID,
+    });
+    // ethers infers Person as the only type in a Person-only set.
+    expect(envelope.message.hash).toBe(
+      ethers.TypedDataEncoder.hash(RENTAL_OFFER_DOMAIN, { Person: MAIL_TYPES.Person }, person),
+    );
+  });
+
+  test('throws when the types have more than one root struct', () => {
     expect(() =>
       buildCswReplaySafeTypedData({
         originalDomain: RENTAL_OFFER_DOMAIN,
-        originalTypes: typesWithDomain,
-        originalValue: SAMPLE_OFFER,
+        originalTypes: { A: [{ name: 'x', type: 'uint256' }], B: [{ name: 'y', type: 'uint256' }] },
+        originalValue: { x: 1 },
         smartAccount: SMART_ACCOUNT,
         chainId: CHAIN_ID,
       }),
-    ).not.toThrow();
+    ).toThrow(/root types/);
+  });
+
+  test('a domain chainId given as a hex or decimal string hashes like the number', () => {
+    const expected = ethers.TypedDataEncoder.hash(RENTAL_OFFER_DOMAIN, RENTAL_OFFER_TYPES, SAMPLE_OFFER);
+    for (const chainId of [`0x${CHAIN_ID.toString(16)}`, String(CHAIN_ID)]) {
+      const envelope = buildCswReplaySafeTypedData({
+        originalDomain: { ...RENTAL_OFFER_DOMAIN, chainId: chainId as unknown as number },
+        originalTypes: RENTAL_OFFER_TYPES,
+        originalValue: SAMPLE_OFFER,
+        smartAccount: SMART_ACCOUNT,
+        chainId: CHAIN_ID,
+      });
+      expect(envelope.message.hash).toBe(expected);
+    }
   });
 });
 
@@ -212,6 +291,15 @@ describe('wrapCswSignature', () => {
       [0, RAW_SIG],
     );
     expect(wrapped).not.toBe(flat);
+  });
+
+  test('is byte-identical to the ethers tuple encoding', () => {
+    expect(wrapCswSignature(RAW_SIG)).toBe(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['tuple(uint8 ownerIndex, bytes signatureData)'],
+        [{ ownerIndex: 0, signatureData: RAW_SIG }],
+      ),
+    );
   });
 
   test('zero-pads ownerIndex correctly (uint8 → 32 bytes)', () => {
@@ -260,11 +348,26 @@ describe('ERC-6492 wrapping', () => {
     expect(sig).toBe(INNER_SIG);
   });
 
+  test('wrapErc6492 is byte-identical to the ethers encoding', () => {
+    const factoryCalldata = buildCoinbaseFactoryCalldata([encodeAddressOwner(EOA)], 0);
+    const expected = ethers.concat([
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['address', 'bytes', 'bytes'],
+        [CDP_SMART_ACCOUNT_FACTORY, factoryCalldata, INNER_SIG],
+      ),
+      ERC6492_MAGIC,
+    ]);
+    expect(wrapErc6492({ factory: CDP_SMART_ACCOUNT_FACTORY, factoryCalldata, innerSig: INNER_SIG })).toBe(
+      expected,
+    );
+  });
+
   test('factory calldata decodes back to createAccount(owners, nonce)', () => {
     const owners = [encodeAddressOwner(EOA)];
     const calldata = buildCoinbaseFactoryCalldata(owners, 3);
-    const decoded = coinbaseFactoryInterface.decodeFunctionData('createAccount', calldata);
+    const decoded = ETHERS_FACTORY_INTERFACE.decodeFunctionData('createAccount', calldata);
     expect(decoded.owners).toEqual(owners);
     expect(decoded.nonce).toBe(3n);
+    expect(calldata).toBe(ETHERS_FACTORY_INTERFACE.encodeFunctionData('createAccount', [owners, 3]));
   });
 });

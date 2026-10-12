@@ -1,1 +1,1 @@
-[{ "path": "lib/module/index.js", "import": "*", "limit": "6 kB", "ignore": ["ethers", "@wagmi/core", "@coinbase/cdp-core", "viem"] }]
+[{ "path": "lib/module/index.js", "import": "*", "limit": "6 kB", "ignore": ["@wagmi/core", "@coinbase/cdp-core", "viem"] }]

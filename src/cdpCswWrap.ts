@@ -1,23 +1,37 @@
 /**
  * Pure-logic helpers for Coinbase Smart Wallet ERC-1271 signature wrapping.
- * Kept separate from `cdp.ts` so jest can import these without pulling in
- * the CDP SDK's ESM runtime (which the babel-jest pipeline can't transform).
+ * Kept separate from `cdpAccount.ts` so jest can import these without pulling
+ * in the CDP SDK's ESM runtime (which the babel-jest pipeline can't transform).
  *
- * See `cdp.ts` `CdpEthersSigner.signTypedData` for usage. See
- * `cdp.test.ts` for what the wrap layout looks like and why the flat
- * `(uint8, bytes)` form is wrong.
+ * `cdpAccount.ts` uses them; `cdpCswWrap.test.ts` shows what the wrap layout
+ * looks like and why the flat `(uint8, bytes)` form is wrong.
  */
 
-import { ethers } from 'ethers';
-import type { TypedDataDomain, TypedDataField } from 'ethers';
+import {
+  concat,
+  encodeAbiParameters,
+  encodeFunctionData,
+  getAddress,
+  hashTypedData,
+  pad,
+  parseAbi,
+  parseAbiParameters,
+  type Hex,
+  type TypedDataDomain,
+  type TypedDataParameter,
+} from 'viem';
+
+/** An EIP-712 struct field (`{ name, type }`). */
+export type TypedDataField = TypedDataParameter;
 
 /**
- * ethers' `TypedDataEncoder.hash` requires the `types` object to NOT include
- * the `EIP712Domain` entry — it derives that itself from the domain. Our
- * inbound `types` from callers may or may not carry it; strip it for the
- * inner offer-digest computation.
+ * The inner offer digest is hashed with the `EIP712Domain` type derived from
+ * the domain's own fields, so an `EIP712Domain` entry in a caller's `types` is
+ * dropped first. Inbound `types` may or may not carry it.
  */
-function omitEIP712Domain(types: Record<string, TypedDataField[]>): Record<string, TypedDataField[]> {
+function omitEIP712Domain(
+  types: Record<string, readonly TypedDataField[]>,
+): Record<string, readonly TypedDataField[]> {
   if (!('EIP712Domain' in types)) return types;
   const { EIP712Domain: _drop, ...rest } = types;
   void _drop;
@@ -32,6 +46,38 @@ function domainTypeFor(domain: TypedDataDomain): TypedDataField[] {
   if (domain.verifyingContract != null) fields.push({ name: 'verifyingContract', type: 'address' });
   if (domain.salt != null) fields.push({ name: 'salt', type: 'bytes32' });
   return fields;
+}
+
+/**
+ * The struct a set of EIP-712 types describes: the one type no other type
+ * references. Throws when that is not exactly one type, since the digest would
+ * then depend on which root the caller meant.
+ */
+export function inferPrimaryType(types: Record<string, readonly TypedDataField[]>): string {
+  const names = Object.keys(types).filter((k) => k !== 'EIP712Domain');
+  const referenced = new Set<string>();
+  for (const name of names) {
+    for (const field of types[name]) {
+      const base = field.type.replace(/(\[\d*\])+$/, '');
+      if (base !== name) referenced.add(base);
+    }
+  }
+  const roots = names.filter((n) => !referenced.has(n));
+  if (roots.length !== 1) {
+    throw new Error(`EIP-712 types have ${roots.length} root types (${roots.join(', ')}); expected exactly one`);
+  }
+  return roots[0];
+}
+
+/** Domain values as `hashTypedData` reads them: `chainId` as a bigint even when given as a string. */
+function normalizeDomain(domain: TypedDataDomain): TypedDataDomain {
+  const out: Record<string, unknown> = {};
+  if (domain.name != null) out.name = domain.name;
+  if (domain.version != null) out.version = domain.version;
+  if (domain.chainId != null) out.chainId = BigInt(domain.chainId as number | bigint | string);
+  if (domain.verifyingContract != null) out.verifyingContract = domain.verifyingContract;
+  if (domain.salt != null) out.salt = domain.salt;
+  return out as TypedDataDomain;
 }
 
 function serializeDomain(domain: TypedDataDomain): Record<string, unknown> {
@@ -56,8 +102,10 @@ function serializeDomain(domain: TypedDataDomain): Record<string, unknown> {
  */
 export function buildCswReplaySafeTypedData(args: {
   originalDomain: TypedDataDomain;
-  originalTypes: Record<string, TypedDataField[]>;
+  originalTypes: Record<string, readonly TypedDataField[]>;
   originalValue: Record<string, unknown>;
+  /** The struct being signed; inferred from `originalTypes` when omitted. */
+  originalPrimaryType?: string;
   smartAccount: string;
   chainId: number | bigint;
 }): {
@@ -66,11 +114,13 @@ export function buildCswReplaySafeTypedData(args: {
   primaryType: string;
   message: Record<string, unknown>;
 } {
-  const offerDigest = ethers.TypedDataEncoder.hash(
-    args.originalDomain,
-    omitEIP712Domain(args.originalTypes),
-    args.originalValue,
-  );
+  const types = omitEIP712Domain(args.originalTypes);
+  const offerDigest = hashTypedData({
+    domain: normalizeDomain(args.originalDomain),
+    types,
+    primaryType: args.originalPrimaryType ?? inferPrimaryType(types),
+    message: args.originalValue,
+  } as Parameters<typeof hashTypedData>[0]);
   return buildCswReplaySafeTypedDataForHash({
     hash: offerDigest,
     smartAccount: args.smartAccount,
@@ -101,7 +151,7 @@ export function buildCswReplaySafeTypedDataForHash(args: {
     name: 'Coinbase Smart Wallet',
     version: '1',
     chainId: args.chainId,
-    verifyingContract: args.smartAccount,
+    verifyingContract: args.smartAccount as Hex,
   };
   return {
     domain: serializeDomain(cswDomain),
@@ -123,17 +173,15 @@ export function buildCswReplaySafeTypedDataForHash(args: {
  * `ownerIndex = 0` is the primary owner slot, which is the EOA on a fresh
  * CDP smart account.
  *
- * Note: encoding a single tuple value (`encode(['tuple(uint8,bytes)'],
- * [[0, sig]])`) produces a different byte layout than encoding two
- * top-level params (`encode(['uint8','bytes'], [0, sig])`) — the tuple
- * form starts with a 32-byte offset prefix that CSW's `abi.decode(sig,
- * (SignatureWrapper))` requires.
+ * Note: encoding a single tuple value (`(uint8, bytes)` as one parameter)
+ * produces a different byte layout than encoding two top-level params
+ * (`uint8, bytes`) — the tuple form starts with a 32-byte offset prefix that
+ * CSW's `abi.decode(sig, (SignatureWrapper))` requires.
  */
-export function wrapCswSignature(rawSig: string): string {
-  return ethers.AbiCoder.defaultAbiCoder().encode(
-    ['tuple(uint8 ownerIndex, bytes signatureData)'],
-    [{ ownerIndex: 0, signatureData: rawSig }],
-  );
+export function wrapCswSignature(rawSig: string): Hex {
+  return encodeAbiParameters(parseAbiParameters('(uint8 ownerIndex, bytes signatureData)'), [
+    { ownerIndex: 0, signatureData: rawSig as Hex },
+  ]);
 }
 
 /**
@@ -144,7 +192,7 @@ export function wrapCswSignature(rawSig: string): string {
  * its `eth_call` simulation), then validates `innerSig` via the now-deployed
  * wallet's `isValidSignature`.
  */
-export const ERC6492_MAGIC =
+export const ERC6492_MAGIC: Hex =
   '0x6492649264926492649264926492649264926492649264926492649264926492';
 
 /**
@@ -167,13 +215,11 @@ export const ERC6492_MAGIC =
 export const CDP_SMART_ACCOUNT_FACTORY =
   '0xba5ed110efdba3d005bfc882d75358acbbb85842';
 
-const COINBASE_FACTORY_ABI = [
+/** The factory's ABI, for encoding `createAccount` / `getAddress` calls and decoding `getAddress`. */
+export const coinbaseFactoryAbi = parseAbi([
   'function createAccount(bytes[] owners, uint256 nonce) payable returns (address)',
   'function getAddress(bytes[] owners, uint256 nonce) view returns (address)',
-];
-
-/** Shared Interface for encoding factory calls / decoding `getAddress`. */
-export const coinbaseFactoryInterface = new ethers.Interface(COINBASE_FACTORY_ABI);
+]);
 
 /**
  * Encode a single EOA owner the way CoinbaseSmartWalletFactory stores it: the
@@ -181,8 +227,8 @@ export const coinbaseFactoryInterface = new ethers.Interface(COINBASE_FACTORY_AB
  * factory's `owners` argument is `bytes[]`, one entry per owner; address owners
  * are 32 bytes, passkey owners are 64 bytes (`x ‖ y`).
  */
-export function encodeAddressOwner(address: string): string {
-  return ethers.zeroPadValue(ethers.getAddress(address), 32);
+export function encodeAddressOwner(address: string): Hex {
+  return pad(getAddress(address), { size: 32 }).toLowerCase() as Hex;
 }
 
 /**
@@ -195,8 +241,12 @@ export function encodeAddressOwner(address: string): string {
 export function buildCoinbaseFactoryCalldata(
   owners: string[],
   nonce: bigint | number,
-): string {
-  return coinbaseFactoryInterface.encodeFunctionData('createAccount', [owners, nonce]);
+): Hex {
+  return encodeFunctionData({
+    abi: coinbaseFactoryAbi,
+    functionName: 'createAccount',
+    args: [owners as Hex[], BigInt(nonce)],
+  });
 }
 
 /**
@@ -210,10 +260,11 @@ export function wrapErc6492(args: {
   factory: string;
   factoryCalldata: string;
   innerSig: string;
-}): string {
-  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-    ['address', 'bytes', 'bytes'],
-    [args.factory, args.factoryCalldata, args.innerSig],
-  );
-  return ethers.concat([encoded, ERC6492_MAGIC]);
+}): Hex {
+  const encoded = encodeAbiParameters(parseAbiParameters('address, bytes, bytes'), [
+    args.factory as Hex,
+    args.factoryCalldata as Hex,
+    args.innerSig as Hex,
+  ]);
+  return concat([encoded, ERC6492_MAGIC]);
 }

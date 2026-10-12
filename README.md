@@ -36,7 +36,7 @@ one.
 ## Install
 
 ```sh
-npm install cdp-wagmi-rn @coinbase/cdp-core @coinbase/cdp-hooks wagmi viem ethers
+npm install cdp-wagmi-rn @coinbase/cdp-core @coinbase/cdp-hooks wagmi viem
 ```
 
 The peer dependencies dedupe to your app's copies; the polyfill/Metro companion
@@ -113,8 +113,18 @@ off-chain ERC-1271 verifier (e.g. SIWE/XMTP) only runs on another chain, call th
 core helper directly with that chain instead of going through the provider:
 
 ```ts
+import { createPublicClient, http } from 'viem';
 import { cdpSignMessage } from 'cdp-wagmi-rn';
-const sig = await cdpSignMessage(message, smartAccount, readProvider, { chainId: 8453 });
+const readClient = createPublicClient({ transport: http(rpcUrl) });
+const sig = await cdpSignMessage(message, smartAccount, readClient, { chainId: 8453 });
+```
+
+`readClient` is any `{ request }` EIP-1193 function (`CdpReadClient`); it is used
+only for the factory `eth_call` that builds the ERC-6492 deploy calldata, and the
+probe is chain-independent, so any chain's RPC works. Pass `null` to skip it and
+fall back to nonce 0.
+
+```ts
 ```
 
 ## API
@@ -126,6 +136,7 @@ const sig = await cdpSignMessage(message, smartAccount, readProvider, { chainId:
 | `CdpWalletConfig` | Wallet-wide config passed once to `cdpWagmiConnector`: `chainId`, `rpcUrl`, `cdpNetwork` (`'base-sepolia' \| 'base'`), optional `smartAccountFactory` override. |
 | `CdpSignOpts` | Per-signature options — `chainId` is the chain bound into the CSW replay-safe envelope, i.e. the chain the signature will be verified on. |
 | `CdpSendOpts` | Per-send options — the CDP UserOperation network. |
+| `CdpReadClient` | The JSON-RPC read dependency: any `{ request }` EIP-1193 function, e.g. a viem `createPublicClient`. Used for the ERC-6492 factory probe, the `wallet_getCallsStatus` receipt lookup, and the provider's read passthrough. |
 
 ### wagmi connector
 
@@ -138,7 +149,8 @@ const sig = await cdpSignMessage(message, smartAccount, readProvider, { chainId:
 
 | Export | Description |
 |---|---|
-| `createCdpEip1193Provider({ smartAccount, readProvider, cfg })` | EIP-1193 provider for non-wagmi consumers: routes `personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction`, and EIP-5792 `wallet_sendCalls` / `wallet_getCallsStatus` / `wallet_getCapabilities` to the CDP core, and forwards reads to the injected ethers provider. |
+| `createCdpEip1193Provider({ smartAccount, readClient, cfg })` | EIP-1193 provider for non-wagmi consumers: routes `personal_sign`, `eth_signTypedData_v4`, `eth_sendTransaction`, and EIP-5792 `wallet_sendCalls` / `wallet_getCallsStatus` / `wallet_getCapabilities` to the CDP core, and forwards reads to the injected `readClient`. |
+| `CdpEip1193Provider` | The `{ request }` shape it returns. |
 | `CdpProviderRpcError` | The EIP-1193 `ProviderRpcError` the provider throws: `code`, `message`, `data` (`{ source, reason, statusCode? }` naming the CDP error), and `cause` (that error). |
 | `PROVIDER_ERROR_CODES` | `{ userRejectedRequest: 4001, unauthorized: 4100, unsupportedMethod: 4200, disconnected: 4900, chainDisconnected: 4901 }`. |
 | `toProviderRpcError(err)` | The classifier the provider applies; returns anything it does not recognise unchanged. |
@@ -151,7 +163,7 @@ viem maps each code to a typed error (`UserRejectedRequestError`, `UnauthorizedP
 |---|---|
 | 4001 | The user closed the MFA verification prompt (cdp-core `MfaError` `CANCELLED`). |
 | 4100 | No CDP session is signed in; an MFA verification did not complete (`SUPERSEDED` by a newer prompt, `LISTENER_REQUIRED` / `NO_LISTENER_MATCHED` — no MFA listener registered); or CDP answered `unauthorized`, `forbidden` or an `mfa_*` error. |
-| 4200 | `eth_sign`, `eth_signTransaction`, `eth_signTypedData` / `_v1` / `_v3`, any `wallet_*` method not listed above, or a read with no read provider. None of these are forwarded to the read provider. |
+| 4200 | `eth_sign`, `eth_signTransaction`, `eth_signTypedData` / `_v1` / `_v3`, any `wallet_*` method not listed above, or a read with no read client. None of these are forwarded to the read client. |
 | 4900 | CDP answered `service_unavailable`, `bad_gateway` or `endpoint_unavailable`. |
 | 4901 | `wallet_sendCalls`, `eth_sendTransaction` or `wallet_switchEthereumChain` named a `chainId` other than `cfg.chainId`, or CDP answered `network_mismatch`. `wallet_switchEthereumChain` to `cfg.chainId` returns `null`. |
 
@@ -167,8 +179,8 @@ without going through the wagmi provider.
 | Export | Description |
 |---|---|
 | `cdpGetAddress(smartAccount)` | Current smart-account address from the hooks bridge, falling back to the address captured at connect time. |
-| `cdpSignMessage(message, smartAccount, readProvider, opts)` | `personal_sign` for a Coinbase Smart Wallet: the EIP-191 hash wrapped in the CSW replay-safe envelope, then ERC-6492-wrapped so a counterfactual account can be deployed inside the verifier's `eth_call`. |
-| `cdpSignTypedData(domain, types, value, smartAccount, opts)` | EIP-712 signing: the typed-data digest wrapped in CSW's replay-safe envelope, signed by the owner EOA, then ABI-encoded for ERC-1271. |
+| `cdpSignMessage(message, smartAccount, readClient, opts)` | `personal_sign` for a Coinbase Smart Wallet: the EIP-191 hash (a string is UTF-8 text, a `Uint8Array` raw bytes) wrapped in the CSW replay-safe envelope, then ERC-6492-wrapped so a counterfactual account can be deployed inside the verifier's `eth_call`. |
+| `cdpSignTypedData(domain, types, value, smartAccount, opts, primaryType?)` | EIP-712 signing (`primaryType` defaults to the one type no other type references): the typed-data digest wrapped in CSW's replay-safe envelope, signed by the owner EOA, then ABI-encoded for ERC-1271. |
 | `cdpSendCalls(calls, smartAccount, opts)` | Execute one or more calls as a single sponsored UserOperation and return the on-chain transaction hash once the bundler includes it. |
 | `waitForUserOpTransactionHash(userOpHash, smartAccount, opts)` | Poll a UserOperation until inclusion; throws if it's dropped or times out. |
 | `CdpCall` | A single call in a UserOperation batch (`{ to, value?, data? }`). |
@@ -199,7 +211,8 @@ Pure helpers + constants.
 | `wrapErc6492({ factory, factoryCalldata, innerSig })` | Wrap an ERC-1271 signature in the ERC-6492 deploy-then-verify envelope for counterfactual accounts. |
 | `buildCoinbaseFactoryCalldata(owners, nonce)` | `createAccount(owners, nonce)` calldata that deploys the smart account at its counterfactual address. |
 | `encodeAddressOwner(address)` | Encode an EOA owner the way the factory stores it: left-padded to a 32-byte word. |
-| `coinbaseFactoryInterface` | ethers `Interface` for the factory (`createAccount` / `getAddress`). |
+| `coinbaseFactoryAbi` | viem ABI for the factory (`createAccount` / `getAddress`). |
+| `TypedDataField` | An EIP-712 struct field (`{ name, type }`). |
 | `CDP_SMART_ACCOUNT_FACTORY` | The CDP embedded-wallet smart-account factory address — **not** the public Coinbase Smart Wallet factory; CDP uses a sibling factory with a different account implementation. |
 | `ERC6492_MAGIC` | The 32-byte ERC-6492 magic suffix a supporting verifier checks for. |
 

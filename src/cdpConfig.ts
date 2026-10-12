@@ -1,8 +1,6 @@
 /**
- * Public config shapes for the CDP smart-account wallet — the nucleus of a
- * future standalone `cdp-wagmi-rn` package. Deliberately imports NOTHING from
- * the app: the connector factory receives these resolved values so the CDP
- * files carry zero app coupling.
+ * Public config shapes for the CDP smart-account wallet. The connector factory
+ * receives these resolved values, so the package carries no host coupling.
  */
 
 /** Wallet-wide config passed once to `cdpWagmiConnector(cfg)`. */
@@ -25,6 +23,16 @@ export interface CdpWalletConfig {
    * restorable session reads as signed-out. Tests pass a small value.
    */
   hydrationTimeoutMs?: number;
+}
+
+/**
+ * The JSON-RPC read dependency: an EIP-1193 `request` function. A viem client
+ * (`createPublicClient({ transport: http(url) })`) satisfies it, as does any
+ * EIP-1193 provider. Used for the ERC-6492 factory probe (`eth_call`), the
+ * `wallet_getCallsStatus` receipt lookup, and the provider's read passthrough.
+ */
+export interface CdpReadClient {
+  request(args: { method: string; params?: unknown }): Promise<unknown>;
 }
 
 /**

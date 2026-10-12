@@ -4,18 +4,20 @@
  * This is the heart of the CDP wallet: the four operations a wallet exposes —
  * get-address, sign-message, sign-typed-data, send-calls — implemented directly
  * on `@coinbase/cdp-core` actions + the Coinbase Smart Wallet (CSW) ERC-1271 /
- * ERC-6492 wrapping. It depends on NO signing framework (no ethers signer, no
- * viem account), so it can be wrapped by:
- *   - `CdpEthersSigner` (the live ethers path today — see cdp.ts), and
- *   - `createCdpEip1193Provider` (the EIP-1193 boundary — see cdpEip1193.ts),
- *     which a future `cdp-wagmi-rn` wagmi connector lifts almost verbatim.
- *
- * Keeping both wrappers on this single core means the core is exercised by the
- * production signer path, not speculative dead code.
+ * ERC-6492 wrapping. It depends on no signer or account abstraction, so
+ * `createCdpEip1193Provider` (cdpEip1193.ts) wraps it for the wagmi connector,
+ * and a host can call it directly — e.g. to sign against a verifier on another
+ * chain.
  */
 
-import { ethers } from 'ethers';
-import type { TypedDataDomain, TypedDataField } from 'ethers';
+import {
+  decodeFunctionResult,
+  encodeFunctionData,
+  getAddress,
+  hashMessage,
+  type Hex,
+  type TypedDataDomain,
+} from 'viem';
 import {
   signEvmTypedData,
   sendUserOperation,
@@ -29,15 +31,16 @@ import {
   wrapErc6492,
   buildCoinbaseFactoryCalldata,
   encodeAddressOwner,
-  coinbaseFactoryInterface,
+  coinbaseFactoryAbi,
   CDP_SMART_ACCOUNT_FACTORY,
+  type TypedDataField,
 } from './cdpCswWrap';
-import type { CdpSignOpts, CdpSendOpts } from './cdpConfig';
+import type { CdpReadClient, CdpSignOpts, CdpSendOpts } from './cdpConfig';
 
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 90_000;
 
-/** A single call in a UserOperation batch (EIP-5792 / ethers tx shape). */
+/** A single call in a UserOperation batch (EIP-5792 call shape). */
 export interface CdpCall {
   to: string;
   value?: bigint;
@@ -54,8 +57,9 @@ export function cdpGetAddress(smartAccount: string): string {
  * personal_sign for a Coinbase Smart Wallet: sign the EIP-191 hash wrapped in
  * the CSW replay-safe envelope (chainId = `opts.chainId`, the chain the verifier
  * runs on), then ERC-6492-wrap so a counterfactual account can be deployed inside
- * the verifier's eth_call. `readProvider` is used only to probe the factory
- * CREATE2 address; null falls back to nonce 0.
+ * the verifier's eth_call. A string message is signed as UTF-8 text, bytes as
+ * raw data. `readClient` is used only to probe the factory CREATE2 address;
+ * null falls back to nonce 0.
  *
  * The provider passes its own `cfg.chainId`; a caller whose verifier lives on a
  * different chain (e.g. an off-chain ERC-1271 verifier that only runs on mainnet)
@@ -64,14 +68,14 @@ export function cdpGetAddress(smartAccount: string): string {
 export async function cdpSignMessage(
   message: string | Uint8Array,
   smartAccount: string,
-  readProvider: ethers.Provider | null,
+  readClient: CdpReadClient | null,
   opts: CdpSignOpts,
 ): Promise<string> {
   const eoa = getCdpState().evmEoaAddress;
   if (!eoa) throw new Error('cdpSignMessage: no EOA in CDP state');
 
   const factory = opts.smartAccountFactory ?? CDP_SMART_ACCOUNT_FACTORY;
-  const innerHash = ethers.hashMessage(message);
+  const innerHash = hashMessage(typeof message === 'string' ? message : { raw: message });
   const envelope = buildCswReplaySafeTypedDataForHash({
     hash: innerHash,
     smartAccount,
@@ -83,7 +87,7 @@ export async function cdpSignMessage(
   });
   const innerSig = wrapCswSignature(result.signature);
 
-  const factoryCalldata = await resolveFactoryCalldata(eoa, smartAccount, readProvider, factory);
+  const factoryCalldata = await resolveFactoryCalldata(eoa, smartAccount, readClient, factory);
   return wrapErc6492({
     factory,
     factoryCalldata,
@@ -99,18 +103,25 @@ export async function cdpSignMessage(
 async function resolveFactoryCalldata(
   eoa: string,
   smartAccount: string,
-  provider: ethers.Provider | null,
+  readClient: CdpReadClient | null,
   factory: string,
 ): Promise<string> {
   const owners = [encodeAddressOwner(eoa)];
-  const target = ethers.getAddress(smartAccount);
-  if (provider) {
+  const target = getAddress(smartAccount);
+  if (readClient) {
     for (let nonce = 0; nonce <= 8; nonce++) {
       try {
-        const data = coinbaseFactoryInterface.encodeFunctionData('getAddress', [owners, nonce]);
-        const ret = await provider.call({ to: factory, data });
-        const [predicted] = coinbaseFactoryInterface.decodeFunctionResult('getAddress', ret);
-        if (ethers.getAddress(predicted as string) === target) {
+        const data = encodeFunctionData({
+          abi: coinbaseFactoryAbi,
+          functionName: 'getAddress',
+          args: [owners, BigInt(nonce)],
+        });
+        const ret = (await readClient.request({
+          method: 'eth_call',
+          params: [{ to: factory, data }, 'latest'],
+        })) as Hex;
+        const predicted = decodeFunctionResult({ abi: coinbaseFactoryAbi, functionName: 'getAddress', data: ret });
+        if (getAddress(predicted) === target) {
           return buildCoinbaseFactoryCalldata(owners, nonce);
         }
       } catch (err: any) {
@@ -130,17 +141,20 @@ async function resolveFactoryCalldata(
  * EIP-712 typed-data signing for a Coinbase Smart Wallet: sign the offer digest
  * wrapped in CSW's replay-safe envelope (chainId = `opts.chainId`, the chain the
  * on-chain verifier runs on) with the owner EOA, then
- * `abi.encode(ownerIndex, sig)`-wrap it for ERC-1271.
+ * `abi.encode(ownerIndex, sig)`-wrap it for ERC-1271. `primaryType` names the
+ * struct being signed; when omitted it is the one type no other type references.
  */
 export async function cdpSignTypedData(
   domain: TypedDataDomain,
-  types: Record<string, TypedDataField[]>,
+  types: Record<string, readonly TypedDataField[]>,
   value: Record<string, unknown>,
   smartAccount: string,
   opts: CdpSignOpts,
+  primaryType?: string,
 ): Promise<string> {
-  const primaryType = Object.keys(types).find((k) => k !== 'EIP712Domain');
-  if (!primaryType) throw new Error('cdpSignTypedData: no primaryType in types');
+  if (!Object.keys(types).some((k) => k !== 'EIP712Domain')) {
+    throw new Error('cdpSignTypedData: no primaryType in types');
+  }
 
   const eoa = getCdpState().evmEoaAddress;
   if (!eoa) throw new Error('cdpSignTypedData: no EOA in CDP state');
@@ -149,6 +163,7 @@ export async function cdpSignTypedData(
     originalDomain: domain,
     originalTypes: types,
     originalValue: value,
+    originalPrimaryType: primaryType,
     smartAccount,
     chainId: opts.chainId,
   });
@@ -173,11 +188,8 @@ export async function cdpSignTypedData(
 /**
  * Execute one or more calls as a single sponsored UserOperation and return the
  * on-chain transaction hash once the bundler includes it. Throws if the userOp
- * is dropped, fails, or times out.
- *
- * (Send/poll logic lifted from the former `CdpEthersSigner.sendTransaction` +
- * `waitForUserOpTransactionHash`. Returns the hash only; callers that need an
- * `ethers.TransactionResponse` resolve it via their own provider.)
+ * is dropped, fails, or times out. Returns the hash only; a caller that needs
+ * the receipt fetches it from its own client.
  */
 export async function cdpSendCalls(
   calls: CdpCall[],

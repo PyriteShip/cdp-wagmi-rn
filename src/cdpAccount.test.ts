@@ -19,10 +19,7 @@ jest.mock('./cdpCswWrap', () => ({
   wrapErc6492: jest.fn(({ innerSig }: any) => `6492(${innerSig})`),
   buildCoinbaseFactoryCalldata: jest.fn(() => '0xFACTORY'),
   encodeAddressOwner: jest.fn((a: string) => a),
-  coinbaseFactoryInterface: {
-    encodeFunctionData: jest.fn(() => '0x'),
-    decodeFunctionResult: jest.fn(() => ['0x0000000000000000000000000000000000000000']),
-  },
+  coinbaseFactoryAbi: jest.requireActual('./cdpCswWrap').coinbaseFactoryAbi,
   CDP_SMART_ACCOUNT_FACTORY: '0xFac',
 }));
 
@@ -34,6 +31,7 @@ import {
   CdpUserOperationFailedError,
 } from './cdpAccount';
 import * as cdpCore from '@coinbase/cdp-core';
+import { ethers } from 'ethers';
 import * as csw from './cdpCswWrap';
 
 beforeEach(() => jest.clearAllMocks());
@@ -109,4 +107,27 @@ test('cdpSignMessage binds the envelope to opts.chainId (verifier chain)', async
     expect.objectContaining({ chainId: 8453, smartAccount: smart }),
   );
   expect(sig).toBe('6492(wrapped(0xINNER))'); // ERC-6492-wrapped CSW signature
+});
+
+test('cdpSignMessage hashes text as UTF-8 and bytes as raw data (EIP-191)', async () => {
+  const smart = '0x1111111111111111111111111111111111111111';
+  const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+  await cdpSignMessage('hello', smart, null, { chainId: 8453 });
+  await cdpSignMessage(bytes, smart, null, { chainId: 8453 });
+  const calls = (csw.buildCswReplaySafeTypedDataForHash as jest.Mock).mock.calls;
+  expect(calls[0][0].hash).toBe(ethers.hashMessage('hello'));
+  expect(calls[1][0].hash).toBe(ethers.hashMessage(bytes));
+});
+
+test('cdpSignMessage probes the factory over eth_call and builds calldata for the matching nonce', async () => {
+  const smart = '0x1111111111111111111111111111111111111111';
+  const word = (a: string) => `0x${a.slice(2).toLowerCase().padStart(64, '0')}`;
+  const request = jest
+    .fn()
+    .mockResolvedValueOnce(word('0x2222222222222222222222222222222222222222'))
+    .mockResolvedValueOnce(word(smart));
+  await cdpSignMessage('hello', smart, { request }, { chainId: 8453 });
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls[0][0]).toMatchObject({ method: 'eth_call', params: [{ to: '0xFac' }, 'latest'] });
+  expect(csw.buildCoinbaseFactoryCalldata).toHaveBeenLastCalledWith(['0xEoa'], 1);
 });

@@ -1,6 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+- **Breaking:** the package runs on viem, its peer dependency in place of ethers.
+  `cdpSignMessage` and `createCdpEip1193Provider` take a `readClient` — any
+  `{ request }` EIP-1193 function (`CdpReadClient`), such as a viem
+  `createPublicClient` — in place of an `ethers.Provider`. The connector builds its
+  own from `cfg.rpcUrl`, so wagmi hosts change nothing.
+- **Breaking:** `coinbaseFactoryInterface` (an ethers `Interface`) is replaced by
+  `coinbaseFactoryAbi` (a viem ABI). `createCdpEip1193Provider` returns the exported
+  `CdpEip1193Provider` type.
+- `wallet_getCallsStatus` returns the node's JSON-RPC receipt fields and logs as-is.
+- `cdpSignTypedData` takes an optional `primaryType`; `eth_signTypedData_v4` passes
+  the request's. Without one, the struct signed is the one type no other type
+  references (previously the first key of `types` was checked for presence and
+  ethers inferred the root).
 
 ## [0.0.5] - 2026-09-23
 ### Added
